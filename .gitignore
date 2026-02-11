@@ -1,0 +1,13 @@
+.env
+.env.save
+__pycache__/
+*.pyc
+venv/
+.venv/
+node_modules/
+nohup.out
+*.log
+.cloudscraper/
+/tmp/manager_state.json
+/tmp/trader_state.json
+/tmp/cost_guard_*.json
