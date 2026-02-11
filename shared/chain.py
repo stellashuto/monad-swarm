@@ -183,6 +183,113 @@ def swap_mon_for_token(
     return tx_hash.hex()
 
 
+# ─── monad.fun Factory Contract Deployment ───────────────
+
+MONAD_FUN_FACTORY_ABI = json.loads("""[
+  {
+    "name": "deployToken",
+    "type": "function",
+    "stateMutability": "payable",
+    "inputs": [
+      {"name": "name", "type": "string"},
+      {"name": "symbol", "type": "string"},
+      {"name": "description", "type": "string"},
+      {"name": "totalSupply", "type": "uint256"}
+    ],
+    "outputs": [{"name": "tokenAddress", "type": "address"}]
+  },
+  {
+    "name": "tokenDeployed",
+    "type": "event",
+    "inputs": [
+      {"name": "token", "type": "address", "indexed": true},
+      {"name": "creator", "type": "address", "indexed": true},
+      {"name": "name", "type": "string", "indexed": false},
+      {"name": "symbol", "type": "string", "indexed": false}
+    ]
+  }
+]""")
+
+
+def deploy_token_monad_fun(
+    w3: Web3,
+    account: Account,
+    factory_address: str,
+    token_name: str,
+    ticker: str,
+    description: str,
+    initial_liquidity_mon: float = 0.01,
+    total_supply: int = 1_000_000_000,
+) -> dict:
+    """Deploy a new token via the monad.fun factory contract.
+
+    Sends `initial_liquidity_mon` as msg.value to seed the bonding curve.
+
+    Returns:
+        {"success": bool, "token_address": str|None, "tx_hash": str|None, "error": str|None}
+    """
+    try:
+        factory = w3.eth.contract(
+            address=Web3.to_checksum_address(factory_address),
+            abi=MONAD_FUN_FACTORY_ABI,
+        )
+        value_wei = Web3.to_wei(initial_liquidity_mon, "ether")
+        supply_wei = total_supply * (10 ** 18)
+
+        tx = factory.functions.deployToken(
+            token_name, ticker, description, supply_wei
+        ).build_transaction({
+            "from": account.address,
+            "value": value_wei,
+            "gas": 3_000_000,
+            "gasPrice": w3.eth.gas_price,
+            "nonce": w3.eth.get_transaction_count(account.address),
+            "chainId": get_chain_id(),
+        })
+
+        signed = account.sign_transaction(tx)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+        if receipt.status != 1:
+            return {
+                "success": False,
+                "token_address": None,
+                "tx_hash": tx_hash.hex(),
+                "error": f"Transaction reverted: {tx_hash.hex()}",
+            }
+
+        # Extract token address from event logs
+        token_address = None
+        try:
+            logs = factory.events.tokenDeployed().process_receipt(receipt)
+            if logs:
+                token_address = logs[0]["args"]["token"]
+        except Exception:
+            # Fallback: scan logs for address-sized topics
+            for log in receipt.logs:
+                if len(log.topics) >= 2:
+                    addr_candidate = "0x" + log.topics[1].hex()[-40:]
+                    if Web3.is_address(addr_candidate):
+                        token_address = Web3.to_checksum_address(addr_candidate)
+                        break
+
+        return {
+            "success": True,
+            "token_address": token_address,
+            "tx_hash": tx_hash.hex(),
+            "error": None,
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "token_address": None,
+            "tx_hash": None,
+            "error": str(e),
+        }
+
+
 def swap_token_for_mon(
     w3: Web3,
     account: Account,

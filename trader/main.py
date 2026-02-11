@@ -42,6 +42,7 @@ STATE_FILE = Path("/tmp/trader_state.json")
 RUNNING = True
 
 DEX_ROUTER = os.getenv("DEX_ROUTER_ADDRESS", "0x0000000000000000000000000000000000000000")
+COORDINATION_FILE = Path("/tmp/manager_trader_coordination.json")
 
 
 def signal_handler(sig, frame):
@@ -100,6 +101,29 @@ class Position:
 # ═══════════════════════════════════════════════
 #  Price monitoring (zero API cost)
 # ═══════════════════════════════════════════════
+
+def read_coordination() -> dict | None:
+    """Read the Manager's coordination file for target token info."""
+    if COORDINATION_FILE.exists():
+        try:
+            data = json.loads(COORDINATION_FILE.read_text())
+            if data.get("status") == "PENDING_BUY" and data.get("token_address"):
+                return data
+        except (json.JSONDecodeError, KeyError):
+            pass
+    return None
+
+
+def mark_coordination_done():
+    """Mark the coordination file as consumed."""
+    if COORDINATION_FILE.exists():
+        try:
+            data = json.loads(COORDINATION_FILE.read_text())
+            data["status"] = "EXECUTED"
+            COORDINATION_FILE.write_text(json.dumps(data, indent=2))
+        except Exception:
+            pass
+
 
 def get_token_balance(w3: Web3, token_address: str, wallet: str) -> int:
     """Get ERC20 token balance (raw units). Zero cost."""
@@ -328,28 +352,32 @@ def main():
             if decision.get("decision") == "ACCEPT":
                 buy_amount = decision.get("buy_amount_mon", deposit["value_mon"] * 0.9)
 
-                # Execute swap if DEX router is configured
-                if DEX_ROUTER != "0x0000000000000000000000000000000000000000":
+                # Read coordination file for target token address
+                coord = read_coordination()
+                target_token = coord["token_address"] if coord else None
+
+                if target_token and DEX_ROUTER != "0x0000000000000000000000000000000000000000":
                     try:
-                        # Note: token_address should come from Manager's coordination
-                        # For now, log the intent
-                        print(f"  [TRADE] Executing swap: {buy_amount:.4f} MON via DEX")
-                        # tx = swap_mon_for_token(w3, account, DEX_ROUTER, target_token, buy_amount)
-                        # print(f"  [TRADE] Swap tx: {tx}")
+                        print(f"  [TRADE] Buying ${coord.get('ticker', '???')}: {buy_amount:.4f} MON → {target_token[:16]}...")
+                        tx = swap_mon_for_token(w3, account, DEX_ROUTER, target_token, buy_amount)
+                        print(f"  [TRADE] Swap tx: {tx}")
+                        mark_coordination_done()
                     except Exception as e:
                         print(f"  [TRADE] Swap failed: {e}")
+                elif target_token:
+                    print(f"  [TRADE] Target token: {target_token[:16]}... (DEX not configured)")
                 else:
-                    print(f"  [TRADE] Would buy tokens with {buy_amount:.4f} MON")
-                    print(f"  [TRADE] (Configure DEX_ROUTER_ADDRESS in .env to enable live swaps)")
+                    print(f"  [TRADE] No target token from Manager. Holding {buy_amount:.4f} MON.")
 
                 # Record position
                 state["positions"].append({
-                    "token_address": None,
+                    "token_address": target_token,
                     "entry_mon": buy_amount,
                     "entry_block": deposit["block"],
                     "entry_time": datetime.now(timezone.utc).isoformat(),
                     "status": "OPEN",
                     "funding_tx": deposit["tx_hash"],
+                    "ticker": coord.get("ticker") if coord else None,
                 })
                 state["total_trades"] += 1
 
