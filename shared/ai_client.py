@@ -15,8 +15,8 @@ import anthropic
 from .cost_guard import CostGuard
 
 # ── Model constants (STRICT — DO NOT CHANGE) ──────────────────
-SCREENING_MODEL = "claude-haiku-4-5-latest"   # 一次判定
-STRATEGY_MODEL  = "claude-sonnet-4-5-latest"  # 二次分析
+SCREENING_MODEL = "claude-haiku-4-5-20251001"   # 一次判定
+STRATEGY_MODEL  = "claude-sonnet-4-5-20250929"  # 二次分析
 
 
 class AIClient:
