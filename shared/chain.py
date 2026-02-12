@@ -41,7 +41,7 @@ def get_balance_mon(w3: Web3, address: str) -> float:
 
 
 def get_chain_id() -> int:
-    return int(os.getenv("CHAIN_ID", 10143))
+    return int(os.getenv("CHAIN_ID", 143))
 
 
 # ─── Native MON Transfers ────────────────────────────────
