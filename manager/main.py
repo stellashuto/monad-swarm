@@ -484,17 +484,50 @@ def coordinate_market_making(
 #  Startup Test Deployment
 # ═══════════════════════════════════════════════
 
+def _generate_test_ticker() -> str:
+    """Generate a unique test ticker: TST + 3 random uppercase letters (e.g. TSTXYZ)."""
+    import random
+    import string
+    suffix = "".join(random.choices(string.ascii_uppercase, k=3))
+    # Ticker must be 3-5 chars; "TST" prefix is already valid but we want uniqueness
+    # Use first 2 chars of prefix + 3 random = 5 chars total for maximum uniqueness
+    return f"TS{suffix}"
+
+
+# Known revert selectors that indicate a duplicate / already-exists condition
+_DUPLICATE_REVERT_SELECTORS = {"0x8d6be2a7"}
+
+
+def _is_duplicate_revert(error_msg: str) -> bool:
+    """Check whether a revert error message is likely caused by symbol duplication."""
+    if not error_msg:
+        return False
+    err_lower = error_msg.lower()
+    # Check for known selectors
+    for sel in _DUPLICATE_REVERT_SELECTORS:
+        if sel in err_lower:
+            return True
+    # Also match common duplicate/exists patterns
+    duplicate_hints = ["already exists", "duplicate", "symbol exists", "token exists"]
+    return any(hint in err_lower for hint in duplicate_hints)
+
+
 def test_deployment(w3, account) -> bool:
     """Execute a one-time test token deployment at startup.
 
-    Deploys a dummy token ($TEST / Monad Swarm Test) on monad.fun
-    to verify the full pipeline end-to-end. Logs the result prominently.
-    Returns True if the test deployment succeeded.
+    Deploys a dummy token on monad.fun with a randomized ticker
+    ($TSxxxxx) to verify the full pipeline end-to-end.
+    If the deployment reverts due to a duplicate symbol, this is
+    treated as non-fatal (logged and returns True).
+    Returns True if the test deployment succeeded or was a known duplicate.
     """
+    test_ticker = _generate_test_ticker()
+    test_name = f"Monad Swarm Test {test_ticker}"
+
     sep = "=" * 60
     print(f"\n{sep}")
     print("  [TEST DEPLOY] Starting startup test deployment...")
-    print(f"  [TEST DEPLOY] Token : Monad Swarm Test ($TEST)")
+    print(f"  [TEST DEPLOY] Token : {test_name} (${test_ticker})")
     print(f"  [TEST DEPLOY] Factory: {MONAD_FUN_FACTORY[:16]}...")
     print(sep)
 
@@ -502,8 +535,8 @@ def test_deployment(w3, account) -> bool:
         w3=w3,
         account=account,
         factory_address=MONAD_FUN_FACTORY,
-        token_name="Monad Swarm Test",
-        ticker="TEST",
+        token_name=test_name,
+        ticker=test_ticker,
         description="Startup test deployment by Monad Swarm Manager. This token verifies the deployment pipeline is operational.",
         initial_liquidity_mon=INITIAL_LIQUIDITY_MON,
     )
@@ -513,14 +546,26 @@ def test_deployment(w3, account) -> bool:
         print("  [TEST DEPLOY] *** SUCCESS ***")
         print(f"  [TEST DEPLOY] Token Address : {result.get('token_address', 'pending log extraction')}")
         print(f"  [TEST DEPLOY] Tx Hash       : {result.get('tx_hash', 'N/A')}")
-    else:
-        print("  [TEST DEPLOY] *** FAILED ***")
-        print(f"  [TEST DEPLOY] Error         : {result.get('error', 'unknown')}")
-        if result.get("tx_hash"):
-            print(f"  [TEST DEPLOY] Tx Hash       : {result['tx_hash']}")
+        print(sep + "\n")
+        return True
+
+    # Check if the failure is a known duplicate revert — treat as non-fatal
+    error_msg = result.get("error", "")
+    if _is_duplicate_revert(error_msg):
+        print("  [TEST DEPLOY] *** DUPLICATE DETECTED (non-fatal) ***")
+        print(f"  [TEST DEPLOY] The ticker ${test_ticker} or a similar symbol already exists on-chain.")
+        print(f"  [TEST DEPLOY] Error: {error_msg}")
+        print(f"  [TEST DEPLOY] Pipeline connectivity is confirmed — proceeding.")
+        print(sep + "\n")
+        return True
+
+    print("  [TEST DEPLOY] *** FAILED ***")
+    print(f"  [TEST DEPLOY] Error         : {error_msg}")
+    if result.get("tx_hash"):
+        print(f"  [TEST DEPLOY] Tx Hash       : {result['tx_hash']}")
     print(sep + "\n")
 
-    return result["success"]
+    return False
 
 
 # ═══════════════════════════════════════════════

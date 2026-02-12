@@ -290,7 +290,7 @@ MONAD_FUN_FACTORY_ABI = json.loads("""[
 def _simulate_deployment(w3: Web3, tx: dict) -> dict:
     """Run eth_call simulation before broadcasting.
 
-    Returns {"ok": bool, "error": str|None, "gas_used": int|None}.
+    Returns {"ok": bool, "error": str|None, "revert_selector": str|None}.
     """
     try:
         # eth_call — simulates without sending
@@ -301,17 +301,16 @@ def _simulate_deployment(w3: Web3, tx: dict) -> dict:
             "value": tx.get("value", 0),
             "gas": tx.get("gas", 5_000_000),
         })
-        return {"ok": True, "error": None}
+        return {"ok": True, "error": None, "revert_selector": None}
     except Exception as e:
         err_str = str(e)
-        # Try to extract revert reason
+        # Try to extract revert selector (e.g. 0x8d6be2a7)
+        import re as _re
+        selector_match = _re.search(r"(0x[0-9a-fA-F]{8})", err_str)
+        revert_selector = selector_match.group(1).lower() if selector_match else None
         revert_reason = err_str
-        if "revert" in err_str.lower():
-            revert_reason = err_str
-        elif "execution reverted" in err_str.lower():
-            revert_reason = err_str
-        logger.error(f"[SIMULATE] eth_call REVERTED: {revert_reason}")
-        return {"ok": False, "error": revert_reason}
+        logger.error(f"[SIMULATE] eth_call REVERTED: {revert_reason} (selector={revert_selector})")
+        return {"ok": False, "error": revert_reason, "revert_selector": revert_selector}
 
 
 def _estimate_gas_dynamic(w3: Web3, tx_params: dict, multiplier: float = 1.3) -> int:
