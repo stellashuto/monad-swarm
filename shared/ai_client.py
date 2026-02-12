@@ -21,6 +21,41 @@ from tenacity import (
 from .cost_guard import CostGuard
 
 
+# ── AI refusal detection ──────────────────────────────────
+_REFUSAL_PATTERNS = [
+    "i can't help",
+    "i cannot help",
+    "i'm not able to",
+    "i am not able to",
+    "i can't assist",
+    "i cannot assist",
+    "i'm unable to",
+    "i must decline",
+    "i won't be able",
+    "against my guidelines",
+    "i can't provide",
+    "i cannot provide",
+    "as an ai",
+    "i'm sorry, but i can't",
+    "i apologize, but i can't",
+]
+
+
+def _is_ai_refusal(text: str) -> bool:
+    """Detect if the AI response is a refusal rather than useful output."""
+    lower = text.strip().lower()
+    return any(pattern in lower for pattern in _REFUSAL_PATTERNS)
+
+
+# ── JSON enforcement prefix ───────────────────────────────
+_JSON_ENFORCEMENT = (
+    "CRITICAL OUTPUT RULE: You MUST respond with a pure JSON object ONLY. "
+    "Do NOT include any markdown formatting (no ```json, no ```), "
+    "no explanatory text, no preamble, no apologies, no commentary. "
+    "Your entire response must be a single valid JSON object starting with { and ending with }. "
+)
+
+
 def _is_retryable(exc: BaseException) -> bool:
     """Return True for transient errors that warrant a retry."""
     # Anthropic OverloadedError (HTTP 529)
@@ -91,17 +126,48 @@ class AIClient:
         return response.content[0].text
 
     def _call_json(self, model: str, system_prompt: str, user_message: str, max_tokens: int) -> dict | None:
-        """Internal: call a model and parse response as JSON."""
-        raw = self._call(model, system_prompt, user_message, max_tokens)
+        """Internal: call a model and parse response as JSON.
+
+        Applies JSON enforcement prefix to the system prompt and detects
+        AI refusal responses to prevent crashes.
+        """
+        enforced_prompt = _JSON_ENFORCEMENT + system_prompt
+        raw = self._call(model, enforced_prompt, user_message, max_tokens)
         if raw is None:
             print(f"  [AI] Budget exceeded or call failed.")
             return None
+
+        # Detect AI refusal
+        if _is_ai_refusal(raw):
+            print(f"  [AI] Refusal detected (model declined to respond): {raw[:200]}")
+            return None
+
         try:
+            # Try direct parse first (ideal case: pure JSON response)
+            stripped = raw.strip()
+            if stripped.startswith("{"):
+                return json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            # Fallback: strip markdown code fences and retry
+            cleaned = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.MULTILINE)
+            cleaned = re.sub(r"\s*```\s*$", "", cleaned, flags=re.MULTILINE)
+            if cleaned.strip().startswith("{"):
+                return json.loads(cleaned.strip())
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            # Last resort: extract first JSON object from the response
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
                 return json.loads(match.group())
         except json.JSONDecodeError:
             print(f"  [AI] JSON parse failed: {raw[:200]}")
+
+        print(f"  [AI] No valid JSON found in response: {raw[:200]}")
         return None
 
     # ── Screening tier (Haiku 4.5 — cheap & fast) ──────────

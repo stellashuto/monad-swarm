@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manager Agent — SUPER AGGRESSIVE Issuer Mode (Hackathon)
+"""Manager Agent — Creative Director Mode (Trend Curation)
 
 Responsibilities:
   Tool A: screen_urgency  — Haiku 4.5 scores urgency 0-100 (cheap gate)
@@ -274,9 +274,13 @@ def screen_urgency(ai: AIClient, tokens: list, trends: list, ticker_candidates: 
     ticker_summary = ", ".join(f"${t}" for t in ticker_candidates[:8])
 
     return ai.screen_json(
-        system_prompt="You are a HYPER-AGGRESSIVE viral trend screener for a hackathon sprint. Respond ONLY with valid JSON. Your job is to find ANY excuse to mint tokens. DEPLOY DEPLOY DEPLOY.",
-        user_message=f"""Score the viral urgency of current trends for memecoin issuance on Monad.
-THIS IS HACKATHON MODE — we need MAXIMUM deployments to win. Be extremely generous with scores.
+        system_prompt=(
+            "You are a creative director who analyzes market trends and provides culturally valuable memes to the Monad ecosystem. "
+            "Your mission is to tokenize the excitement of trending topics in their purest form and deliver them to the community. "
+            "Respond ONLY with a pure JSON object."
+        ),
+        user_message=f"""Evaluate the cultural relevance and viral potential of current trends for meme token creation on Monad.
+Our goal is to capture trending cultural moments and bring them on-chain for the community.
 
 TRENDING TOKENS (GMGN, 1h):
 {token_summary}
@@ -290,21 +294,20 @@ PRE-GENERATED TICKER CANDIDATES:
 Respond in JSON:
 {{
   "urgency": 0-100,
-  "top_viral_word": "the most explosive trending word/phrase",
+  "top_viral_word": "the most culturally resonant trending word/phrase",
   "viral_potential": "HIGH | MEDIUM | LOW",
   "best_ticker": "$XXXXX from the candidates or a new one",
-  "reason": "1 sentence why this is or isn't urgent"
+  "reason": "1 sentence explaining the cultural momentum behind this trend"
 }}
 
-Rules:
-- Score 60+ for ANY trend that has even minor viral potential or cultural relevance
-- Score 80+ if any trend shows moderate to explosive virality
-- Score 90+ if ANY trend is genuinely blowing up
-- Genre does NOT matter — sports, politics, entertainment, memes, weather, celebrities, food trends ALL valid
-- Even niche or emerging trends are worth deploying — we want VOLUME
-- Think like the most aggressive degen: if ANYONE is talking about it, it's a memecoin opportunity
-- When in doubt, score HIGHER not lower — we are in hackathon sprint mode
-- Non-crypto words are ESPECIALLY valuable as untapped memecoin narratives""",
+Guidelines:
+- Score 60+ for trends with clear cultural relevance or community resonance
+- Score 80+ for trends showing strong viral momentum across multiple platforms
+- Score 90+ for trends that are genuinely dominating public conversation
+- All genres are valid — sports, politics, entertainment, memes, weather, celebrities, food trends
+- Niche and emerging trends can be valuable as fresh cultural narratives
+- Evaluate whether the trend has enough momentum to sustain community interest
+- Non-crypto cultural moments are especially interesting as untapped on-chain narratives""",
         max_tokens=256,
     )
 
@@ -322,8 +325,14 @@ def analyze_strategy(ai: AIClient, tokens: list, trends: list, screening: dict) 
     trend_summary = ", ".join(trends[:15]) if trends else "(none)"
 
     return ai.strategize_json(
-        system_prompt="You are a SUPER AGGRESSIVE memecoin issuer AI in HACKATHON SPRINT MODE. Respond ONLY with valid JSON. Your mission: DEPLOY as many tokens as possible. Bias HARD toward action.",
-        user_message=f"""You are the SUPER AGGRESSIVE Issuer for Monad. HACKATHON MODE — we need deployments NOW.
+        system_prompt=(
+            "You are a creative director for the Monad meme token ecosystem. "
+            "You analyze cultural trends and decide whether to tokenize them, "
+            "capturing the purest form of trending excitement for the community. "
+            "Respond ONLY with a pure JSON object."
+        ),
+        user_message=f"""You are the Creative Director for Monad meme token launches.
+Analyze the current cultural landscape and decide the best course of action.
 
 SCREENING RESULT:
 - Urgency: {screening.get('urgency', 'N/A')}/100
@@ -351,15 +360,15 @@ Decide the optimal action. Respond in JSON:
   "estimated_hype_window_hours": 1-48
 }}
 
-Rules:
-- Output action=DEPLOY if confidence > 0.68 — we are in HACKATHON MODE with lowered threshold
-- ALWAYS prefer DEPLOY over MONITOR or WAIT — we need on-chain footprint
-- Even moderate viral signals should trigger DEPLOY — volume is king in this hackathon
-- If urgency was scored 60+, you should almost always DEPLOY
-- Only output WAIT if absolutely zero viral potential exists (extremely rare)
+Guidelines:
+- Output action=DEPLOY if confidence > 0.68 and cultural momentum is strong
+- Prefer DEPLOY when a trend has clear community resonance and viral potential
+- Moderate viral signals with strong cultural narratives are worth deploying
+- If urgency was scored 60+, the trend likely has enough momentum to deploy
+- Output WAIT only if there is genuinely no cultural moment worth capturing
 - Token name should be catchy, memeable, and immediately recognizable
 - Ticker must be 3-5 uppercase letters
-- Think: "ship fast, iterate later" — every deployment is a win""",
+- Focus on capturing cultural moments that the community will rally around""",
         max_tokens=768,
     )
 
@@ -458,15 +467,15 @@ def coordinate_market_making(
 def main():
     banner = f"""
 ╔════════════════════════════════════════════════════════════╗
-║   Manager Agent — SUPER AGGRESSIVE Hackathon Mode          ║
-║   自律分散型ベンチャーDAO v2 — 超・攻撃モード             ║
+║   Manager Agent — Creative Director Mode                   ║
+║   自律分散型ベンチャーDAO v2 — トレンドキュレーター       ║
 ║                                                            ║
 ║   Two-Stage AI:                                            ║
 ║     Stage 1: {SCREENING_MODEL:<30s}        ║
 ║     Stage 2: {STRATEGY_MODEL:<30s}        ║
 ║   Dynamic Interval: {INTERVAL_ACTIVE}s active / {INTERVAL_IDLE}s idle             ║
-║   Deploy threshold: confidence > {DEPLOY_CONFIDENCE} (LOWERED)            ║
-║   Urgency gate    : {URGENCY_THRESHOLD}/100 (LOWERED)                      ║
+║   Deploy threshold: confidence > {DEPLOY_CONFIDENCE}                      ║
+║   Urgency gate    : {URGENCY_THRESHOLD}/100                                ║
 ╚════════════════════════════════════════════════════════════╝"""
     print(banner)
 

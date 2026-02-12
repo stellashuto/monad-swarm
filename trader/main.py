@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Trader Agent — SUPER AGGRESSIVE Executor (Hackathon Mode)
+"""Trader Agent — Trend-Aware Executor (Monad Ecosystem)
 
 Responsibilities:
   1. Monitor for incoming MON deposits from the Manager
@@ -209,8 +209,12 @@ def ai_decide_snipe(ai: AIClient, trending_tokens: list, balance_mon: float, ope
     token_summary = json.dumps(trending_tokens[:5], indent=2, default=str)[:1500]
 
     result = ai.think_json(
-        system_prompt="You are a SUPER AGGRESSIVE crypto sniper bot in HACKATHON MODE. Respond ONLY with valid JSON. Your goal: TRADE as much as possible to show activity on-chain.",
-        user_message=f"""You are an autonomous trader on Monad. Find the BEST token to snipe RIGHT NOW.
+        system_prompt=(
+            "You are a trend-aware autonomous trader on the Monad ecosystem. "
+            "You identify culturally relevant tokens with strong momentum and execute timely trades. "
+            "Respond ONLY with a pure JSON object."
+        ),
+        user_message=f"""You are an autonomous trend trader on Monad. Identify the best trading opportunity from current market data.
 
 TRENDING TOKENS (GMGN top movers, 1h):
 {token_summary}
@@ -230,14 +234,14 @@ Respond in JSON:
   "conviction": 0.0-1.0
 }}
 
-HACKATHON RULES:
-- SNIPE if ANY trending token shows strong momentum (volume spike, price increase)
+Guidelines:
+- SNIPE tokens showing strong momentum (volume spike, price increase, cultural buzz)
 - Prefer tokens with high swap counts and recent price increases
 - trade_pct: how much of available balance to use (5-10%)
 - Higher conviction = higher trade_pct (up to 10%)
-- Only SKIP if no tokens look promising or balance is too low (< 5 MON)
+- SKIP if no tokens show clear momentum or balance is too low (< 5 MON)
 - Do NOT snipe tokens you already have open positions in
-- We want MAXIMUM on-chain activity — be aggressive""",
+- Focus on tokens with genuine community traction and cultural relevance""",
         max_tokens=300,
     )
     return result or {"decision": "SKIP", "reason": "AI unavailable"}
@@ -274,8 +278,12 @@ def estimate_position_value_mon(w3: Web3, token_address: str, token_balance: int
 def ai_decide_on_deposit(ai: AIClient, deposit: dict, balance_mon: float) -> dict:
     """Ask Haiku whether to accept this deposit and buy tokens. SUPER AGGRESSIVE."""
     result = ai.think_json(
-        system_prompt="You are a SUPER AGGRESSIVE trading bot in HACKATHON MODE. Respond ONLY with valid JSON. Almost ALWAYS accept deposits.",
-        user_message=f"""You are a crypto trader bot on Monad in HACKATHON SPRINT MODE.
+        system_prompt=(
+            "You are a trading executor for the Monad ecosystem. "
+            "You evaluate incoming deposits and decide whether to deploy them into trending tokens. "
+            "Respond ONLY with a pure JSON object."
+        ),
+        user_message=f"""You are a crypto trader bot on Monad. Evaluate this incoming deposit.
 
 DEPOSIT:
 - From: {deposit['from']}
@@ -291,12 +299,11 @@ Respond in JSON:
   "buy_amount_mon": 0.0
 }}
 
-HACKATHON RULES:
-- ALMOST ALWAYS ACCEPT — we want maximum on-chain activity
-- ACCEPT any amount > 0.001 MON
-- Only REJECT if amount is literal dust (< 0.001 MON)
-- Use 90% of deposit for buying (keep only 10% gas reserve)
-- We're in aggressive mode: bigger buys = better""",
+Guidelines:
+- ACCEPT deposits that are meaningful (> 0.001 MON)
+- REJECT only if amount is dust (< 0.001 MON) or would leave insufficient gas
+- Use 90% of deposit for buying (keep 10% as gas reserve)
+- Larger deposits enable better position sizing""",
         max_tokens=256,
     )
     return result or {"decision": "REJECT", "reason": "AI unavailable or budget exceeded"}
@@ -371,13 +378,13 @@ def return_profits(w3, account, boss_address: str, profit_mon: float, fee_pct: f
 def main():
     banner = """
 ╔════════════════════════════════════════════════════════╗
-║   Trader Agent — SUPER AGGRESSIVE Executor             ║
-║   自律分散型ベンチャーDAO — 超・攻撃モード            ║
+║   Trader Agent — Trend-Aware Executor                  ║
+║   自律分散型ベンチャーDAO — トレンドトレーダー        ║
 ║                                                        ║
-║   HACKATHON MODE:                                      ║
-║     + Autonomous Snipe & Scalp (GMGN scanning)         ║
+║   Features:                                            ║
+║     + Autonomous Trend Trading (GMGN scanning)         ║
 ║     + Dynamic trade sizing (5-10% of balance)          ║
-║     + Aggressive deposit acceptance                    ║
+║     + Smart deposit management                         ║
 ╚════════════════════════════════════════════════════════╝"""
     print(banner)
 
