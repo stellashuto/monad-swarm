@@ -183,30 +183,37 @@ def swap_mon_for_token(
     return tx_hash.hex()
 
 
-# ─── monad.fun Factory Contract Deployment ───────────────
+# ─── Nad.fun (monad.fun) BondingCurveRouter Deployment ───
+# Official ABI from https://github.com/Naddotfun/contract-v3-abi
+# Mainnet BondingCurveRouter: 0x6F6B8F1a20703309951a5127c45B49b1CD981A22
+
+# Default factory address — used when MONAD_FUN_FACTORY_ADDRESS is not in .env
+NADFUN_ROUTER_DEFAULT = "0x6F6B8F1a20703309951a5127c45B49b1CD981A22"
 
 MONAD_FUN_FACTORY_ABI = json.loads("""[
   {
-    "name": "deployToken",
     "type": "function",
-    "stateMutability": "payable",
+    "name": "create",
     "inputs": [
-      {"name": "name", "type": "string"},
-      {"name": "symbol", "type": "string"},
-      {"name": "description", "type": "string"},
-      {"name": "totalSupply", "type": "uint256"}
+      {
+        "name": "params",
+        "type": "tuple",
+        "internalType": "struct IBondingCurveRouter.TokenCreationParams",
+        "components": [
+          {"name": "name", "type": "string", "internalType": "string"},
+          {"name": "symbol", "type": "string", "internalType": "string"},
+          {"name": "tokenURI", "type": "string", "internalType": "string"},
+          {"name": "amountOut", "type": "uint256", "internalType": "uint256"},
+          {"name": "salt", "type": "bytes32", "internalType": "bytes32"},
+          {"name": "actionId", "type": "uint8", "internalType": "uint8"}
+        ]
+      }
     ],
-    "outputs": [{"name": "tokenAddress", "type": "address"}]
-  },
-  {
-    "name": "tokenDeployed",
-    "type": "event",
-    "inputs": [
-      {"name": "token", "type": "address", "indexed": true},
-      {"name": "creator", "type": "address", "indexed": true},
-      {"name": "name", "type": "string", "indexed": false},
-      {"name": "symbol", "type": "string", "indexed": false}
-    ]
+    "outputs": [
+      {"name": "token", "type": "address", "internalType": "address"},
+      {"name": "pool", "type": "address", "internalType": "address"}
+    ],
+    "stateMutability": "payable"
   }
 ]""")
 
@@ -221,23 +228,28 @@ def deploy_token_monad_fun(
     initial_liquidity_mon: float = 0.01,
     total_supply: int = 1_000_000_000,
 ) -> dict:
-    """Deploy a new token via the monad.fun factory contract.
+    """Deploy a new token via Nad.fun BondingCurveRouter.create().
 
-    Sends `initial_liquidity_mon` as msg.value to seed the bonding curve.
+    Sends `initial_liquidity_mon` as msg.value (deploy fee + initial buy).
+    The `description` is passed as tokenURI metadata.
 
     Returns:
         {"success": bool, "token_address": str|None, "tx_hash": str|None, "error": str|None}
     """
     try:
-        factory = w3.eth.contract(
+        router = w3.eth.contract(
             address=Web3.to_checksum_address(factory_address),
             abi=MONAD_FUN_FACTORY_ABI,
         )
         value_wei = Web3.to_wei(initial_liquidity_mon, "ether")
-        supply_wei = total_supply * (10 ** 18)
 
-        tx = factory.functions.deployToken(
-            token_name, ticker, description, supply_wei
+        # Generate a unique salt from token name + current timestamp
+        salt = Web3.keccak(text=f"{token_name}-{ticker}-{int(time.time())}")
+        # actionId 0 = standard create
+        action_id = 0
+
+        tx = router.functions.create(
+            (token_name, ticker, description, 0, salt, action_id)
         ).build_transaction({
             "from": account.address,
             "value": value_wei,
@@ -259,20 +271,18 @@ def deploy_token_monad_fun(
                 "error": f"Transaction reverted: {tx_hash.hex()}",
             }
 
-        # Extract token address from event logs
+        # Extract token address from return value or logs
         token_address = None
         try:
-            logs = factory.events.tokenDeployed().process_receipt(receipt)
-            if logs:
-                token_address = logs[0]["args"]["token"]
-        except Exception:
-            # Fallback: scan logs for address-sized topics
+            # Try decoding the return value from logs
             for log in receipt.logs:
                 if len(log.topics) >= 2:
                     addr_candidate = "0x" + log.topics[1].hex()[-40:]
                     if Web3.is_address(addr_candidate):
                         token_address = Web3.to_checksum_address(addr_candidate)
                         break
+        except Exception:
+            pass
 
         return {
             "success": True,

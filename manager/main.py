@@ -38,7 +38,7 @@ load_dotenv()
 from shared.ai_client import AIClient, SCREENING_MODEL, STRATEGY_MODEL
 from shared.chain import (
     get_web3, get_account, get_balance_mon, send_mon,
-    deploy_token_monad_fun,
+    deploy_token_monad_fun, NADFUN_ROUTER_DEFAULT,
 )
 from shared.event_logger import log_deploy_decision, log_token_deployed
 
@@ -52,7 +52,7 @@ INTERVAL_IDLE = 120             # SUPER AGGRESSIVE: faster idle polling (was 300
 INTERVAL_ACTIVE = 15            # SUPER AGGRESSIVE: faster active polling (was 30)
 MONAD_FUN_FACTORY = os.getenv(
     "MONAD_FUN_FACTORY_ADDRESS",
-    "0x0000000000000000000000000000000000000000",
+    NADFUN_ROUTER_DEFAULT,
 )
 INITIAL_LIQUIDITY_MON = float(os.getenv("INITIAL_LIQUIDITY_MON", "0.01"))
 COORDINATION_FILE = Path("/tmp/manager_trader_coordination.json")
@@ -369,14 +369,14 @@ Rules:
 # ═══════════════════════════════════════════════
 
 def deploy_token(w3, account, token_name: str, ticker: str, description: str) -> dict:
-    """Deploy a token on monad.fun via the factory contract.
+    """Deploy a token on Nad.fun via BondingCurveRouter.create().
 
     Uses wallet MON for initial liquidity seeding.
     Returns {"success": bool, "token_address": str|None, "tx_hash": str|None, "error": str|None}
     """
     factory_addr = MONAD_FUN_FACTORY
-    if factory_addr == "0x0000000000000000000000000000000000000000":
-        print("  [DEPLOY] monad.fun factory address not configured. Set MONAD_FUN_FACTORY_ADDRESS in .env")
+    if not factory_addr or factory_addr == "0x0000000000000000000000000000000000000000":
+        print("  [DEPLOY] Nad.fun factory address not configured. Set MONAD_FUN_FACTORY_ADDRESS in .env")
         return {"success": False, "token_address": None, "tx_hash": None, "error": "Factory not configured"}
 
     balance = get_balance_mon(w3, account.address)
