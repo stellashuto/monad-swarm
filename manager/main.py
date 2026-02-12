@@ -39,6 +39,7 @@ from shared.ai_client import AIClient, SCREENING_MODEL, STRATEGY_MODEL
 from shared.chain import (
     get_web3, get_account, get_balance_mon, send_mon,
     deploy_token_monad_fun, NADFUN_ROUTER_DEFAULT,
+    sanitize_token_name, validate_ticker, run_deploy_health_check,
 )
 from shared.event_logger import log_deploy_decision, log_token_deployed
 
@@ -383,6 +384,17 @@ def deploy_token(w3, account, token_name: str, ticker: str, description: str) ->
     Uses wallet MON for initial liquidity seeding.
     Returns {"success": bool, "token_address": str|None, "tx_hash": str|None, "error": str|None}
     """
+    # ── Sanitize parameters ──
+    original_name = token_name
+    token_name = sanitize_token_name(token_name)
+    if token_name != original_name:
+        print(f"  [DEPLOY] Token name truncated: '{original_name}' → '{token_name}'")
+
+    try:
+        ticker = validate_ticker(ticker)
+    except ValueError as e:
+        return {"success": False, "token_address": None, "tx_hash": None, "error": str(e)}
+
     factory_addr = MONAD_FUN_FACTORY
     if not factory_addr or factory_addr == "0x0000000000000000000000000000000000000000":
         print("  [DEPLOY] Nad.fun factory address not configured. Set MONAD_FUN_FACTORY_ADDRESS in .env")
@@ -496,6 +508,17 @@ def main():
     print(f"  Liquidity  : {INITIAL_LIQUIDITY_MON} MON per deploy")
     print("─" * 60)
 
+    # ── Deploy Health Check (runs once at startup) ────────
+    print("\n[HEALTH CHECK] Running deployment dry-run...")
+    hc = run_deploy_health_check(w3, account, MONAD_FUN_FACTORY)
+    if hc["ok"]:
+        print(f"[HEALTH CHECK] PASSED: {hc['details']}")
+    else:
+        print(f"[HEALTH CHECK] FAILED: {hc['details']}")
+        print("[HEALTH CHECK] Aborting — fix the issue above and restart.")
+        sys.exit(1)
+    print("─" * 60)
+
     cycle = 0
     current_interval = state.get("last_interval", INTERVAL_IDLE)
 
@@ -570,8 +593,11 @@ def main():
             action = strategy.get("action", "WAIT")
             confidence = strategy.get("confidence", 0)
             viral_score = strategy.get("viral_score", 0)
-            token_name = strategy.get("token_name", "MonadMeme")
-            ticker = strategy.get("ticker", "MEME").strip("$").upper()
+            token_name = sanitize_token_name(strategy.get("token_name", "MonadMeme"))
+            try:
+                ticker = validate_ticker(strategy.get("ticker", "MEME"))
+            except ValueError:
+                ticker = "MEME"
             narrative = strategy.get("narrative", "N/A")
             hype_window = strategy.get("estimated_hype_window_hours", "?")
 
