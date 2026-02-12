@@ -12,8 +12,13 @@ import os
 import re
 import json
 import time
+import random
+import string
+import logging
 from web3 import Web3
 from eth_account import Account
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Connection & Account ────────────────────────────────
@@ -73,21 +78,39 @@ def validate_ticker(ticker: str) -> str:
 
     Rules:
       - Strip leading '$' if present
-      - Remove any non-alphanumeric characters
+      - Remove any non-alpha characters (letters only)
       - Uppercase
-      - Must be 3–6 characters; pad with 'X' or truncate as needed
+      - Must be 3–5 characters; pad with 'X' or truncate as needed
 
     Returns the sanitized ticker.
     Raises ValueError if nothing usable remains after cleaning.
     """
-    cleaned = re.sub(r"[^A-Za-z0-9]", "", ticker.strip().lstrip("$")).upper()
+    cleaned = re.sub(r"[^A-Za-z]", "", ticker.strip().lstrip("$")).upper()
     if not cleaned:
-        raise ValueError(f"Ticker '{ticker}' contains no valid alphanumeric characters")
+        raise ValueError(f"Ticker '{ticker}' contains no valid alpha characters")
     if len(cleaned) < 3:
         cleaned = cleaned.ljust(3, "X")
-    if len(cleaned) > 6:
-        cleaned = cleaned[:6]
+    if len(cleaned) > 5:
+        cleaned = cleaned[:5]
     return cleaned
+
+
+def make_unique_ticker(ticker: str, existing_tickers: set[str]) -> str:
+    """If `ticker` collides with `existing_tickers`, append a random uppercase letter.
+
+    Retries up to 26 times to find a unique variant.
+    """
+    ticker = validate_ticker(ticker)
+    if ticker not in existing_tickers:
+        return ticker
+    for _ in range(26):
+        suffix = random.choice(string.ascii_uppercase)
+        candidate = (ticker[:4] + suffix) if len(ticker) >= 5 else (ticker + suffix)
+        candidate = candidate[:5]
+        if candidate not in existing_tickers:
+            logger.info(f"Ticker collision: '{ticker}' → '{candidate}'")
+            return candidate
+    return ticker
 
 
 # ─── Native MON Transfers ────────────────────────────────
@@ -264,6 +287,60 @@ MONAD_FUN_FACTORY_ABI = json.loads("""[
 ]""")
 
 
+def _simulate_deployment(w3: Web3, tx: dict) -> dict:
+    """Run eth_call simulation before broadcasting.
+
+    Returns {"ok": bool, "error": str|None, "gas_used": int|None}.
+    """
+    try:
+        # eth_call — simulates without sending
+        w3.eth.call({
+            "from": tx["from"],
+            "to": tx["to"],
+            "data": tx.get("data", b""),
+            "value": tx.get("value", 0),
+            "gas": tx.get("gas", 5_000_000),
+        })
+        return {"ok": True, "error": None}
+    except Exception as e:
+        err_str = str(e)
+        # Try to extract revert reason
+        revert_reason = err_str
+        if "revert" in err_str.lower():
+            revert_reason = err_str
+        elif "execution reverted" in err_str.lower():
+            revert_reason = err_str
+        logger.error(f"[SIMULATE] eth_call REVERTED: {revert_reason}")
+        return {"ok": False, "error": revert_reason}
+
+
+def _estimate_gas_dynamic(w3: Web3, tx_params: dict, multiplier: float = 1.3) -> int:
+    """Estimate gas dynamically via eth_estimateGas and apply a safety multiplier.
+
+    Falls back to 3_900_000 if estimation fails.
+    """
+    try:
+        estimated = w3.eth.estimate_gas(tx_params)
+        final = int(estimated * multiplier)
+        logger.info(f"[GAS] estimateGas={estimated}, ×{multiplier}={final}")
+        return final
+    except Exception as e:
+        logger.warning(f"[GAS] estimateGas failed ({e}), falling back to 3_900_000")
+        return 3_900_000
+
+
+def _get_priority_fee(w3: Web3, boost_pct: float = 0.20) -> int:
+    """Get recommended max priority fee and add a boost (default +20%)."""
+    try:
+        base_fee = w3.eth.max_priority_fee
+        boosted = int(base_fee * (1 + boost_pct))
+        logger.info(f"[FEE] base_priority_fee={base_fee}, +{int(boost_pct*100)}%={boosted}")
+        return boosted
+    except Exception:
+        # Fallback: use gas_price as-is (legacy chain)
+        return 0
+
+
 def deploy_token_monad_fun(
     w3: Web3,
     account: Account,
@@ -271,13 +348,19 @@ def deploy_token_monad_fun(
     token_name: str,
     ticker: str,
     description: str,
-    initial_liquidity_mon: float = 0.01,
+    initial_liquidity_mon: float = 0.1,
     total_supply: int = 1_000_000_000,
 ) -> dict:
     """Deploy a new token via Nad.fun BondingCurveRouter.create().
 
     Sends `initial_liquidity_mon` as msg.value (deploy fee + initial buy).
     The `description` is passed as tokenURI metadata.
+
+    Features:
+      - Dynamic gas estimation (eth_estimateGas × 1.3)
+      - Priority fee boost (+20%)
+      - Pre-broadcast simulation via eth_call
+      - Initial liquidity default: 0.1 MON
 
     Returns:
         {"success": bool, "token_address": str|None, "tx_hash": str|None, "error": str|None}
@@ -298,17 +381,59 @@ def deploy_token_monad_fun(
         # actionId 0 = standard create
         action_id = 0
 
-        # Gas limit raised 30% (3_000_000 → 3_900_000) to prevent out-of-gas reverts
-        tx = router.functions.create(
-            (token_name, ticker, description, 0, salt, action_id)
-        ).build_transaction({
+        nonce = w3.eth.get_transaction_count(account.address)
+        chain_id = get_chain_id()
+
+        # Build base tx params for gas estimation
+        base_tx = {
             "from": account.address,
             "value": value_wei,
-            "gas": 3_900_000,
-            "gasPrice": w3.eth.gas_price,
-            "nonce": w3.eth.get_transaction_count(account.address),
-            "chainId": get_chain_id(),
+            "nonce": nonce,
+            "chainId": chain_id,
+        }
+
+        # Try EIP-1559 fee model first, fallback to legacy gasPrice
+        priority_fee = _get_priority_fee(w3)
+        if priority_fee > 0:
+            try:
+                latest_block = w3.eth.get_block("latest")
+                base_fee_per_gas = latest_block.get("baseFeePerGas", 0)
+                max_fee = base_fee_per_gas * 2 + priority_fee
+                base_tx["maxPriorityFeePerGas"] = priority_fee
+                base_tx["maxFeePerGas"] = max_fee
+            except Exception:
+                base_tx["gasPrice"] = int(w3.eth.gas_price * 1.2)
+        else:
+            base_tx["gasPrice"] = int(w3.eth.gas_price * 1.2)
+
+        # Build the function call
+        fn_call = router.functions.create(
+            (token_name, ticker, description, 0, salt, action_id)
+        )
+        tx = fn_call.build_transaction({**base_tx, "gas": 5_000_000})
+
+        # ── Dynamic gas estimation (eth_estimateGas × 1.3) ──
+        gas_limit = _estimate_gas_dynamic(w3, {
+            "from": tx["from"],
+            "to": tx["to"],
+            "data": tx.get("data", b""),
+            "value": tx.get("value", 0),
         })
+        tx["gas"] = gas_limit
+
+        # ── Pre-broadcast simulation (eth_call) ──
+        sim = _simulate_deployment(w3, tx)
+        if not sim["ok"]:
+            logger.error(f"[DEPLOY] Simulation FAILED — will NOT broadcast: {sim['error']}")
+            print(f"  [SIMULATE] *** REVERT DETECTED *** {sim['error']}")
+            return {
+                "success": False,
+                "token_address": None,
+                "tx_hash": None,
+                "error": f"Simulation reverted: {sim['error']}",
+            }
+        logger.info("[DEPLOY] Simulation passed — broadcasting transaction")
+        print("  [SIMULATE] Simulation OK — broadcasting...")
 
         signed = account.sign_transaction(tx)
         tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
@@ -319,13 +444,12 @@ def deploy_token_monad_fun(
                 "success": False,
                 "token_address": None,
                 "tx_hash": tx_hash.hex(),
-                "error": f"Transaction reverted: {tx_hash.hex()}",
+                "error": f"Transaction reverted on-chain: {tx_hash.hex()}",
             }
 
         # Extract token address from return value or logs
         token_address = None
         try:
-            # Try decoding the return value from logs
             for log in receipt.logs:
                 if len(log.topics) >= 2:
                     addr_candidate = "0x" + log.topics[1].hex()[-40:]
@@ -343,6 +467,7 @@ def deploy_token_monad_fun(
         }
 
     except Exception as e:
+        logger.error(f"[DEPLOY] Exception: {e}")
         return {
             "success": False,
             "token_address": None,
@@ -473,7 +598,7 @@ def run_deploy_health_check(
             ).call({
                 "from": account.address,
                 "value": value_wei,
-                "gas": 3_900_000,
+                "gas": 5_000_000,
             })
             checks.append("Dry-run create() call succeeded")
         except Exception as e:

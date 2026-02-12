@@ -39,7 +39,8 @@ from shared.ai_client import AIClient, SCREENING_MODEL, STRATEGY_MODEL
 from shared.chain import (
     get_web3, get_account, get_balance_mon, send_mon,
     deploy_token_monad_fun, NADFUN_ROUTER_DEFAULT,
-    sanitize_token_name, validate_ticker, run_deploy_health_check,
+    sanitize_token_name, validate_ticker, make_unique_ticker,
+    run_deploy_health_check,
 )
 from shared.event_logger import log_deploy_decision, log_token_deployed
 
@@ -55,7 +56,7 @@ MONAD_FUN_FACTORY = os.getenv(
     "MONAD_FUN_FACTORY_ADDRESS",
     NADFUN_ROUTER_DEFAULT,
 )
-INITIAL_LIQUIDITY_MON = float(os.getenv("INITIAL_LIQUIDITY_MON", "0.01"))
+INITIAL_LIQUIDITY_MON = float(os.getenv("INITIAL_LIQUIDITY_MON", "0.1"))
 COORDINATION_FILE = Path("/tmp/manager_trader_coordination.json")
 
 
@@ -378,10 +379,16 @@ Guidelines:
 #  Tool: deploy_token (monad.fun on-chain)
 # ═══════════════════════════════════════════════
 
-def deploy_token(w3, account, token_name: str, ticker: str, description: str) -> dict:
+def _get_deployed_tickers(state: dict) -> set[str]:
+    """Collect all tickers already deployed to avoid collisions."""
+    return {t.get("ticker", "") for t in state.get("deployed_tokens", [])}
+
+
+def deploy_token(w3, account, token_name: str, ticker: str, description: str, state: dict | None = None) -> dict:
     """Deploy a token on Nad.fun via BondingCurveRouter.create().
 
     Uses wallet MON for initial liquidity seeding.
+    Applies collision avoidance for ticker symbols.
     Returns {"success": bool, "token_address": str|None, "tx_hash": str|None, "error": str|None}
     """
     # ── Sanitize parameters ──
@@ -391,7 +398,8 @@ def deploy_token(w3, account, token_name: str, ticker: str, description: str) ->
         print(f"  [DEPLOY] Token name truncated: '{original_name}' → '{token_name}'")
 
     try:
-        ticker = validate_ticker(ticker)
+        existing = _get_deployed_tickers(state) if state else set()
+        ticker = make_unique_ticker(ticker, existing)
     except ValueError as e:
         return {"success": False, "token_address": None, "tx_hash": None, "error": str(e)}
 
@@ -473,6 +481,49 @@ def coordinate_market_making(
 
 
 # ═══════════════════════════════════════════════
+#  Startup Test Deployment
+# ═══════════════════════════════════════════════
+
+def test_deployment(w3, account) -> bool:
+    """Execute a one-time test token deployment at startup.
+
+    Deploys a dummy token ($TEST / Monad Swarm Test) on monad.fun
+    to verify the full pipeline end-to-end. Logs the result prominently.
+    Returns True if the test deployment succeeded.
+    """
+    sep = "=" * 60
+    print(f"\n{sep}")
+    print("  [TEST DEPLOY] Starting startup test deployment...")
+    print(f"  [TEST DEPLOY] Token : Monad Swarm Test ($TEST)")
+    print(f"  [TEST DEPLOY] Factory: {MONAD_FUN_FACTORY[:16]}...")
+    print(sep)
+
+    result = deploy_token_monad_fun(
+        w3=w3,
+        account=account,
+        factory_address=MONAD_FUN_FACTORY,
+        token_name="Monad Swarm Test",
+        ticker="TEST",
+        description="Startup test deployment by Monad Swarm Manager. This token verifies the deployment pipeline is operational.",
+        initial_liquidity_mon=INITIAL_LIQUIDITY_MON,
+    )
+
+    print(f"\n{sep}")
+    if result["success"]:
+        print("  [TEST DEPLOY] *** SUCCESS ***")
+        print(f"  [TEST DEPLOY] Token Address : {result.get('token_address', 'pending log extraction')}")
+        print(f"  [TEST DEPLOY] Tx Hash       : {result.get('tx_hash', 'N/A')}")
+    else:
+        print("  [TEST DEPLOY] *** FAILED ***")
+        print(f"  [TEST DEPLOY] Error         : {result.get('error', 'unknown')}")
+        if result.get("tx_hash"):
+            print(f"  [TEST DEPLOY] Tx Hash       : {result['tx_hash']}")
+    print(sep + "\n")
+
+    return result["success"]
+
+
+# ═══════════════════════════════════════════════
 #  Main Loop — Two-Stage Gatekeeper + Aggressive Issuer
 # ═══════════════════════════════════════════════
 
@@ -517,6 +568,15 @@ def main():
         print(f"[HEALTH CHECK] FAILED: {hc['details']}")
         print("[HEALTH CHECK] Aborting — fix the issue above and restart.")
         sys.exit(1)
+    print("─" * 60)
+
+    # ── Startup Test Deployment (runs once) ────────────────
+    test_ok = test_deployment(w3, account)
+    if test_ok:
+        print("[STARTUP] Test deployment verified — pipeline is LIVE.")
+    else:
+        print("[STARTUP] Test deployment failed — check logs above.")
+        print("[STARTUP] Continuing to main loop (test failure is non-fatal).")
     print("─" * 60)
 
     cycle = 0
@@ -617,7 +677,7 @@ def main():
                 print(f"  >>> Confidence: {confidence} | Viral: {viral_score}")
                 log_deploy_decision(ticker, token_name, confidence, strategy.get("reasoning", "N/A"))
 
-                result = deploy_token(w3, account, token_name, ticker, description)
+                result = deploy_token(w3, account, token_name, ticker, description, state=state)
 
                 if result["success"]:
                     token_addr = result.get("token_address")
