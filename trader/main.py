@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Trader Agent — The Executor
+"""Trader Agent — SUPER AGGRESSIVE Executor (Hackathon Mode)
 
 Responsibilities:
   1. Monitor for incoming MON deposits from the Manager
   2. On deposit: use Claude Haiku 4.5 to decide buy/reject
   3. Execute swaps via DEX, track P&L, take profit / stop loss
   4. Return profits (minus fee) to Manager (Profit Sharing)
+  5. [NEW] AUTONOMOUS SNIPE & SCALP: independently discover and trade trending tokens
 
 Cost optimization (The Gatekeeper):
-  Only calls Haiku when a deposit arrives or price moves sharply.
+  Only calls Haiku when a deposit arrives, price moves sharply, or autonomous scan finds opportunity.
   All monitoring is pure Python + on-chain reads — zero API cost.
 """
 
@@ -17,6 +18,8 @@ import sys
 import time
 import json
 import signal
+import requests
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -126,6 +129,120 @@ def mark_coordination_done():
             pass
 
 
+# ═══════════════════════════════════════════════
+#  Autonomous Snipe & Scalp (SUPER AGGRESSIVE)
+# ═══════════════════════════════════════════════
+
+_gmgn_browser_ctx = None
+
+
+def _get_gmgn_page():
+    """Launch (or reuse) a Chromium context for GMGN."""
+    global _gmgn_browser_ctx
+    if _gmgn_browser_ctx is not None:
+        try:
+            _gmgn_browser_ctx["page"].title()
+            return _gmgn_browser_ctx["page"], False
+        except Exception:
+            _gmgn_browser_ctx = None
+
+    from playwright.sync_api import sync_playwright
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(
+        headless=True,
+        executable_path=os.getenv("CHROMIUM_PATH") or None,
+        args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+    )
+    context = browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    )
+    page = context.new_page()
+    page.goto("https://gmgn.ai/", timeout=30000)
+    page.wait_for_selector("body", timeout=30000)
+    page.wait_for_timeout(5000)
+    _gmgn_browser_ctx = {"pw": pw, "browser": browser, "page": page}
+    return page, True
+
+
+def fetch_trending_tokens_for_snipe() -> list[dict]:
+    """Fetch top trending tokens from GMGN for autonomous sniping."""
+    global _gmgn_browser_ctx
+    url = os.getenv("GMGN_API_URL", "https://gmgn.ai/defi/quotation/v1/rank/monad/swaps/1h")
+    try:
+        page, _ = _get_gmgn_page()
+        raw = page.evaluate(
+            """async (url) => {
+                const r = await fetch(url, {headers: {"Accept": "application/json"}});
+                return await r.text();
+            }""",
+            url,
+        )
+        data = json.loads(raw)
+        ranks = data.get("data", {}).get("rank", [])
+        if not ranks:
+            ranks = data.get("data", [])
+        return ranks[:10] if isinstance(ranks, list) else []
+    except Exception as e:
+        print(f"  [SNIPE] GMGN fetch failed: {e}")
+        _gmgn_browser_ctx = None
+        return []
+
+
+def compute_dynamic_trade_amount(balance_mon: float, ai_suggested_pct: float = 7.5) -> float:
+    """Compute dynamic trade amount: 5-10% of balance, AI can adjust within range.
+
+    SUPER AGGRESSIVE: uses 5-10% of total balance per trade.
+    Keeps minimum 2 MON as gas reserve.
+    """
+    gas_reserve = 2.0
+    available = max(0, balance_mon - gas_reserve)
+    # Clamp AI suggestion to 5-10% range
+    pct = max(5.0, min(10.0, ai_suggested_pct))
+    amount = available * (pct / 100.0)
+    return round(amount, 4)
+
+
+def ai_decide_snipe(ai: AIClient, trending_tokens: list, balance_mon: float, open_positions: list) -> dict:
+    """Ask Haiku whether to snipe a trending token autonomously."""
+    open_tickers = [p.get("token_address", "")[:10] for p in open_positions if p.get("status") == "OPEN"]
+    token_summary = json.dumps(trending_tokens[:5], indent=2, default=str)[:1500]
+
+    result = ai.think_json(
+        system_prompt="You are a SUPER AGGRESSIVE crypto sniper bot in HACKATHON MODE. Respond ONLY with valid JSON. Your goal: TRADE as much as possible to show activity on-chain.",
+        user_message=f"""You are an autonomous trader on Monad. Find the BEST token to snipe RIGHT NOW.
+
+TRENDING TOKENS (GMGN top movers, 1h):
+{token_summary}
+
+YOUR STATUS:
+- Balance: {balance_mon:.4f} MON
+- Currently open positions: {len(open_tickers)} ({', '.join(open_tickers) if open_tickers else 'none'})
+- Available for trading: {max(0, balance_mon - 2.0):.4f} MON (keeping 2 MON gas reserve)
+
+Respond in JSON:
+{{
+  "decision": "SNIPE" or "SKIP",
+  "token_address": "0x... address of token to buy (from trending list)",
+  "ticker": "token ticker if available",
+  "reason": "1-2 sentences",
+  "trade_pct": 5.0-10.0,
+  "conviction": 0.0-1.0
+}}
+
+HACKATHON RULES:
+- SNIPE if ANY trending token shows strong momentum (volume spike, price increase)
+- Prefer tokens with high swap counts and recent price increases
+- trade_pct: how much of available balance to use (5-10%)
+- Higher conviction = higher trade_pct (up to 10%)
+- Only SKIP if no tokens look promising or balance is too low (< 5 MON)
+- Do NOT snipe tokens you already have open positions in
+- We want MAXIMUM on-chain activity — be aggressive""",
+        max_tokens=300,
+    )
+    return result or {"decision": "SKIP", "reason": "AI unavailable"}
+
+
 def get_token_balance(w3: Web3, token_address: str, wallet: str) -> int:
     """Get ERC20 token balance (raw units). Zero cost."""
     try:
@@ -155,10 +272,10 @@ def estimate_position_value_mon(w3: Web3, token_address: str, token_balance: int
 # ═══════════════════════════════════════════════
 
 def ai_decide_on_deposit(ai: AIClient, deposit: dict, balance_mon: float) -> dict:
-    """Ask Haiku whether to accept this deposit and buy tokens."""
+    """Ask Haiku whether to accept this deposit and buy tokens. SUPER AGGRESSIVE."""
     result = ai.think_json(
-        system_prompt="You are a trading bot. Respond ONLY with valid JSON.",
-        user_message=f"""You are a crypto trader bot on Monad. Your manager sent you funds.
+        system_prompt="You are a SUPER AGGRESSIVE trading bot in HACKATHON MODE. Respond ONLY with valid JSON. Almost ALWAYS accept deposits.",
+        user_message=f"""You are a crypto trader bot on Monad in HACKATHON SPRINT MODE.
 
 DEPOSIT:
 - From: {deposit['from']}
@@ -174,10 +291,12 @@ Respond in JSON:
   "buy_amount_mon": 0.0
 }}
 
-Rules:
-- ACCEPT if the amount is reasonable (> 0.001 MON)
-- REJECT if the amount is suspiciously large (> 50% of your balance) or dust (< 0.001)
-- Keep 10% as gas reserve""",
+HACKATHON RULES:
+- ALMOST ALWAYS ACCEPT — we want maximum on-chain activity
+- ACCEPT any amount > 0.001 MON
+- Only REJECT if amount is literal dust (< 0.001 MON)
+- Use 90% of deposit for buying (keep only 10% gas reserve)
+- We're in aggressive mode: bigger buys = better""",
         max_tokens=256,
     )
     return result or {"decision": "REJECT", "reason": "AI unavailable or budget exceeded"}
@@ -252,11 +371,13 @@ def return_profits(w3, account, boss_address: str, profit_mon: float, fee_pct: f
 def main():
     banner = """
 ╔════════════════════════════════════════════════════════╗
-║   Trader Agent — The Executor                         ║
-║   自律分散型ベンチャーDAO                             ║
+║   Trader Agent — SUPER AGGRESSIVE Executor             ║
+║   自律分散型ベンチャーDAO — 超・攻撃モード            ║
 ║                                                        ║
-║   Cost-optimized: API calls only on deposits           ║
-║   and sharp P&L moves. Zero-cost monitoring.           ║
+║   HACKATHON MODE:                                      ║
+║     + Autonomous Snipe & Scalp (GMGN scanning)         ║
+║     + Dynamic trade sizing (5-10% of balance)          ║
+║     + Aggressive deposit acceptance                    ║
 ╚════════════════════════════════════════════════════════╝"""
     print(banner)
 
@@ -264,6 +385,8 @@ def main():
     boss_address = os.getenv("BOSS_WALLET_ADDRESS", "")
     stop_loss_pct = float(os.getenv("STOP_LOSS_PCT", 15))
     trader_fee_pct = 100.0 - float(os.getenv("PROFIT_SHARE_PCT", 80))
+    # SUPER AGGRESSIVE: autonomous snipe interval (every N cycles)
+    snipe_interval_cycles = int(os.getenv("SNIPE_INTERVAL_CYCLES", 30))
 
     # Initialize
     ai = AIClient(role="TRADER")
@@ -331,10 +454,43 @@ def main():
                 if pnl_pct > 80 or pnl_pct < -stop_loss_pct:
                     sharp_moves.append({"position": pos, "pnl_pct": pnl_pct, "value": estimated_value})
 
+        # ── Phase 2.5: AUTONOMOUS SNIPE SCAN (SUPER AGGRESSIVE) ──
+        autonomous_snipes = []
+        if cycle % snipe_interval_cycles == 0:
+            balance = get_balance_mon(w3, my_address)
+            if balance > 5.0:  # Only snipe if we have enough balance
+                print(f"\n[{now}] [SNIPE SCAN] Cycle {cycle} — Scanning GMGN for autonomous snipe opportunities...")
+                try:
+                    trending = fetch_trending_tokens_for_snipe()
+                    if trending:
+                        open_positions = [p for p in state["positions"] if p.get("status") == "OPEN"]
+                        snipe_decision = ai_decide_snipe(ai, trending, balance, open_positions)
+                        print(f"  [SNIPE] Decision: {snipe_decision.get('decision')} — {snipe_decision.get('reason', 'N/A')}")
+
+                        if snipe_decision.get("decision") == "SNIPE":
+                            token_addr = snipe_decision.get("token_address")
+                            trade_pct = snipe_decision.get("trade_pct", 7.5)
+                            trade_amount = compute_dynamic_trade_amount(balance, trade_pct)
+
+                            if token_addr and trade_amount > 0.1:
+                                autonomous_snipes.append({
+                                    "token_address": token_addr,
+                                    "ticker": snipe_decision.get("ticker", "???"),
+                                    "amount_mon": trade_amount,
+                                    "conviction": snipe_decision.get("conviction", 0.5),
+                                })
+                                print(f"  [SNIPE] TARGET: {token_addr[:16]}... | Amount: {trade_amount:.4f} MON ({trade_pct:.1f}% of balance)")
+                            else:
+                                print(f"  [SNIPE] Trade amount too low ({trade_amount:.4f} MON) or no token address. Skipping.")
+                    else:
+                        print(f"  [SNIPE] No trending tokens found.")
+                except Exception as e:
+                    print(f"  [SNIPE] Autonomous scan error: {e}")
+
         # ── Phase 3: THE GATEKEEPER — skip API if nothing happened ──
-        if not deposits and not sharp_moves:
+        if not deposits and not sharp_moves and not autonomous_snipes:
             if cycle % 30 == 0:
-                print(f"[{now}] Cycle {cycle} — No deposits, no sharp moves. Sleeping...")
+                print(f"[{now}] Cycle {cycle} — No deposits, no sharp moves, no snipes. Sleeping...")
             time.sleep(poll_interval)
             save_state(state)
             continue
@@ -392,6 +548,38 @@ def main():
                     print(f"  [REJECT] Return tx: {return_tx}")
                 except Exception as e:
                     print(f"  [REJECT] Return failed: {e}")
+
+        # Handle autonomous snipes (SUPER AGGRESSIVE)
+        for snipe in autonomous_snipes:
+            token_addr = snipe["token_address"]
+            amount = snipe["amount_mon"]
+            ticker = snipe["ticker"]
+            print(f"  [SNIPE EXEC] Sniping ${ticker}: {amount:.4f} MON → {token_addr[:16]}...")
+
+            if DEX_ROUTER != "0x0000000000000000000000000000000000000000":
+                try:
+                    tx = swap_mon_for_token(w3, account, DEX_ROUTER, token_addr, amount)
+                    print(f"  [SNIPE EXEC] Swap tx: {tx}")
+                    log_initial_swap(ticker, token_addr, amount, tx)
+                except Exception as e:
+                    print(f"  [SNIPE EXEC] Swap failed: {e}")
+                    continue
+            else:
+                print(f"  [SNIPE EXEC] DEX not configured — would snipe {amount:.4f} MON → {token_addr[:16]}...")
+
+            # Record autonomous position
+            state["positions"].append({
+                "token_address": token_addr,
+                "entry_mon": amount,
+                "entry_block": current_block,
+                "entry_time": datetime.now(timezone.utc).isoformat(),
+                "status": "OPEN",
+                "funding_tx": "autonomous_snipe",
+                "ticker": ticker,
+                "source": "AUTONOMOUS_SNIPE",
+            })
+            state["total_trades"] += 1
+            print(f"  [SNIPE EXEC] Position recorded: ${ticker} | {amount:.4f} MON")
 
         # Handle sharp P&L moves
         for move in sharp_moves:

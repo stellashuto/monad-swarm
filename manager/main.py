@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manager Agent — Aggressive Issuer Mode
+"""Manager Agent — SUPER AGGRESSIVE Issuer Mode (Hackathon)
 
 Responsibilities:
   Tool A: screen_urgency  — Haiku 4.5 scores urgency 0-100 (cheap gate)
@@ -46,10 +46,10 @@ from shared.event_logger import log_deploy_decision, log_token_deployed
 # ═══════════════════════════════════════════════
 #  Constants
 # ═══════════════════════════════════════════════
-URGENCY_THRESHOLD = 80          # Haiku score threshold to invoke Sonnet
-DEPLOY_CONFIDENCE = 0.85        # Confidence threshold for DEPLOY action
-INTERVAL_IDLE = 300             # Seconds between polls when no change
-INTERVAL_ACTIVE = 30            # Seconds between polls when change detected
+URGENCY_THRESHOLD = 60          # SUPER AGGRESSIVE: lowered from 80 → 60
+DEPLOY_CONFIDENCE = 0.68        # SUPER AGGRESSIVE: lowered from 0.85 → 0.68
+INTERVAL_IDLE = 120             # SUPER AGGRESSIVE: faster idle polling (was 300)
+INTERVAL_ACTIVE = 15            # SUPER AGGRESSIVE: faster active polling (was 30)
 MONAD_FUN_FACTORY = os.getenv(
     "MONAD_FUN_FACTORY_ADDRESS",
     "0x0000000000000000000000000000000000000000",
@@ -154,12 +154,15 @@ def fetch_gmgn_trends() -> list[dict]:
 
 
 def fetch_viral_trends() -> list[str]:
-    """Fetch viral/trending topics from Google Trends RSS.
+    """Fetch viral/trending topics from multiple sources.
 
-    Genre-agnostic: captures ALL viral words, not just crypto.
+    SUPER AGGRESSIVE: captures ALL viral words from every source.
+    Genre-agnostic: sports, politics, entertainment, memes, weather — ALL valid.
     Zero AI cost.
     """
     trends = []
+
+    # Source 1: Google Trends (US)
     try:
         resp = requests.get(
             "https://trends.google.com/trending/rss?geo=US",
@@ -168,11 +171,24 @@ def fetch_viral_trends() -> list[str]:
         )
         if resp.status_code == 200:
             titles = re.findall(r"<title>(.+?)</title>", resp.text)
-            trends.extend(t for t in titles[1:21] if t != "Daily Search Trends")
+            trends.extend(t for t in titles[1:30] if t != "Daily Search Trends")
     except Exception as e:
-        print(f"  [Trends] Google Trends failed: {e}")
+        print(f"  [Trends] Google Trends US failed: {e}")
 
-    # Additional: Twitter/X trending topics via public endpoints
+    # Source 2: Google Trends (Global) — SUPER AGGRESSIVE: more sources
+    try:
+        resp = requests.get(
+            "https://trends.google.com/trending/rss?geo=",
+            headers={"User-Agent": "MonadSwarm/2.0"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            titles = re.findall(r"<title>(.+?)</title>", resp.text)
+            trends.extend(t for t in titles[1:20] if t != "Daily Search Trends")
+    except Exception as e:
+        print(f"  [Trends] Google Trends Global failed: {e}")
+
+    # Source 3: Twitter/X trending topics
     try:
         resp = requests.get(
             "https://trends24.in/united-states/",
@@ -183,11 +199,24 @@ def fetch_viral_trends() -> list[str]:
             hashtags = re.findall(r'<a[^>]*class="trend-link"[^>]*>([^<]+)</a>', resp.text)
             if not hashtags:
                 hashtags = re.findall(r"#(\w+)", resp.text)
-            trends.extend(h.strip("#").strip() for h in hashtags[:15])
+            trends.extend(h.strip("#").strip() for h in hashtags[:20])
     except Exception as e:
         print(f"  [Trends] X/Twitter trends failed: {e}")
 
-    # Deduplicate while preserving order
+    # Source 4: Twitter/X worldwide — SUPER AGGRESSIVE: even more data
+    try:
+        resp = requests.get(
+            "https://trends24.in/",
+            headers={"User-Agent": "MonadSwarm/2.0"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            hashtags = re.findall(r'<a[^>]*class="trend-link"[^>]*>([^<]+)</a>', resp.text)
+            trends.extend(h.strip("#").strip() for h in hashtags[:15])
+    except Exception as e:
+        print(f"  [Trends] X/Twitter worldwide failed: {e}")
+
+    # Deduplicate while preserving order — SUPER AGGRESSIVE: return more results
     seen = set()
     unique = []
     for t in trends:
@@ -195,7 +224,7 @@ def fetch_viral_trends() -> list[str]:
         if key not in seen and len(key) > 1:
             seen.add(key)
             unique.append(t)
-    return unique[:20]
+    return unique[:30]  # Increased from 20 → 30 for more coverage
 
 
 def compute_trend_fingerprint(tokens: list, trends: list) -> str:
@@ -208,7 +237,10 @@ def compute_trend_fingerprint(tokens: list, trends: list) -> str:
 
 
 def derive_ticker_candidates(trends: list[str]) -> list[str]:
-    """Derive potential $TICKER symbols from viral words. Zero AI cost."""
+    """Derive potential $TICKER symbols from viral words. Zero AI cost.
+
+    SUPER AGGRESSIVE: generates more candidates from each trend.
+    """
     tickers = []
     for word in trends:
         clean = re.sub(r"[^a-zA-Z0-9]", "", word).upper()
@@ -221,9 +253,11 @@ def derive_ticker_candidates(trends: list[str]) -> list[str]:
                 abbrev = "".join(p[0] for p in parts if p).upper()
                 if 3 <= len(abbrev) <= 5:
                     tickers.append(abbrev)
-    # Deduplicate
+            # SUPER AGGRESSIVE: also try first 3 letters as ticker
+            tickers.append(clean[:3])
+    # Deduplicate — return more candidates (was 10, now 20)
     seen = set()
-    return [t for t in tickers if not (t in seen or seen.add(t))][:10]
+    return [t for t in tickers if not (t in seen or seen.add(t))][:20]
 
 
 # ═══════════════════════════════════════════════
@@ -240,8 +274,9 @@ def screen_urgency(ai: AIClient, tokens: list, trends: list, ticker_candidates: 
     ticker_summary = ", ".join(f"${t}" for t in ticker_candidates[:8])
 
     return ai.screen_json(
-        system_prompt="You are a viral trend screener. Respond ONLY with valid JSON. Be aggressive — find opportunity in ANY trending topic.",
+        system_prompt="You are a HYPER-AGGRESSIVE viral trend screener for a hackathon sprint. Respond ONLY with valid JSON. Your job is to find ANY excuse to mint tokens. DEPLOY DEPLOY DEPLOY.",
         user_message=f"""Score the viral urgency of current trends for memecoin issuance on Monad.
+THIS IS HACKATHON MODE — we need MAXIMUM deployments to win. Be extremely generous with scores.
 
 TRENDING TOKENS (GMGN, 1h):
 {token_summary}
@@ -262,9 +297,14 @@ Respond in JSON:
 }}
 
 Rules:
-- Score 80+ if ANY trend shows explosive virality, meme energy, or cultural moment potential
-- Genre does NOT matter — sports, politics, entertainment, memes are ALL valid
-- Think like a degen: if people are talking about it, it can be a memecoin""",
+- Score 60+ for ANY trend that has even minor viral potential or cultural relevance
+- Score 80+ if any trend shows moderate to explosive virality
+- Score 90+ if ANY trend is genuinely blowing up
+- Genre does NOT matter — sports, politics, entertainment, memes, weather, celebrities, food trends ALL valid
+- Even niche or emerging trends are worth deploying — we want VOLUME
+- Think like the most aggressive degen: if ANYONE is talking about it, it's a memecoin opportunity
+- When in doubt, score HIGHER not lower — we are in hackathon sprint mode
+- Non-crypto words are ESPECIALLY valuable as untapped memecoin narratives""",
         max_tokens=256,
     )
 
@@ -282,8 +322,8 @@ def analyze_strategy(ai: AIClient, tokens: list, trends: list, screening: dict) 
     trend_summary = ", ".join(trends[:15]) if trends else "(none)"
 
     return ai.strategize_json(
-        system_prompt="You are an aggressive memecoin issuer AI. Respond ONLY with valid JSON.",
-        user_message=f"""You are the Aggressive Issuer for Monad. The screening AI flagged HIGH urgency.
+        system_prompt="You are a SUPER AGGRESSIVE memecoin issuer AI in HACKATHON SPRINT MODE. Respond ONLY with valid JSON. Your mission: DEPLOY as many tokens as possible. Bias HARD toward action.",
+        user_message=f"""You are the SUPER AGGRESSIVE Issuer for Monad. HACKATHON MODE — we need deployments NOW.
 
 SCREENING RESULT:
 - Urgency: {screening.get('urgency', 'N/A')}/100
@@ -312,10 +352,14 @@ Decide the optimal action. Respond in JSON:
 }}
 
 Rules:
-- Output action=DEPLOY if confidence > 0.85 AND the trend is exploding RIGHT NOW
-- Be aggressive: if a topic is genuinely viral, ship the token FAST
+- Output action=DEPLOY if confidence > 0.68 — we are in HACKATHON MODE with lowered threshold
+- ALWAYS prefer DEPLOY over MONITOR or WAIT — we need on-chain footprint
+- Even moderate viral signals should trigger DEPLOY — volume is king in this hackathon
+- If urgency was scored 60+, you should almost always DEPLOY
+- Only output WAIT if absolutely zero viral potential exists (extremely rare)
 - Token name should be catchy, memeable, and immediately recognizable
-- Ticker must be 3-5 uppercase letters""",
+- Ticker must be 3-5 uppercase letters
+- Think: "ship fast, iterate later" — every deployment is a win""",
         max_tokens=768,
     )
 
@@ -414,14 +458,15 @@ def coordinate_market_making(
 def main():
     banner = f"""
 ╔════════════════════════════════════════════════════════════╗
-║   Manager Agent — Aggressive Issuer Mode                   ║
-║   自律分散型ベンチャーDAO v2                               ║
+║   Manager Agent — SUPER AGGRESSIVE Hackathon Mode          ║
+║   自律分散型ベンチャーDAO v2 — 超・攻撃モード             ║
 ║                                                            ║
 ║   Two-Stage AI:                                            ║
 ║     Stage 1: {SCREENING_MODEL:<30s}        ║
 ║     Stage 2: {STRATEGY_MODEL:<30s}        ║
-║   Dynamic Interval: {INTERVAL_ACTIVE}s active / {INTERVAL_IDLE}s idle              ║
-║   Deploy threshold: confidence > {DEPLOY_CONFIDENCE}                    ║
+║   Dynamic Interval: {INTERVAL_ACTIVE}s active / {INTERVAL_IDLE}s idle             ║
+║   Deploy threshold: confidence > {DEPLOY_CONFIDENCE} (LOWERED)            ║
+║   Urgency gate    : {URGENCY_THRESHOLD}/100 (LOWERED)                      ║
 ╚════════════════════════════════════════════════════════════╝"""
     print(banner)
 
@@ -556,7 +601,8 @@ def main():
                     # Coordinate with Trader for initial liquidity support
                     if token_addr and trader_address:
                         balance = get_balance_mon(w3, account.address)
-                        fund_amount = min(balance * 0.1, float(os.getenv("MAX_FUND_AMOUNT_MON", 0.5)))
+                        # SUPER AGGRESSIVE: fund up to 15% of balance (was 10%), higher cap (was 0.5)
+                        fund_amount = min(balance * 0.15, float(os.getenv("MAX_FUND_AMOUNT_MON", 5.0)))
                         if fund_amount > 0.01:
                             # Write coordination file BEFORE funding so Trader knows what to buy
                             coord_data = {
