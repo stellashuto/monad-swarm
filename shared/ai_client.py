@@ -12,7 +12,34 @@ import os
 import re
 import json
 import anthropic
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception,
+)
 from .cost_guard import CostGuard
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Return True for transient errors that warrant a retry."""
+    # Anthropic OverloadedError (HTTP 529)
+    if isinstance(exc, anthropic.APIStatusError) and exc.status_code == 529:
+        return True
+    # Transient network / pipe errors
+    if isinstance(exc, (BrokenPipeError, ConnectionError, ConnectionResetError)):
+        return True
+    if isinstance(exc, anthropic.APIConnectionError):
+        return True
+    return False
+
+
+_retry_decorator = retry(
+    retry=retry_if_exception(_is_retryable),
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    stop=stop_after_attempt(5),
+    reraise=True,
+)
 
 # ── Model constants (STRICT — DO NOT CHANGE) ──────────────────
 SCREENING_MODEL = "claude-haiku-4-5-20251001"   # 一次判定
@@ -50,6 +77,11 @@ class AIClient:
             return None
         self.guard.record_call()
         print(f"  [AI] Calling {model} (call #{self.guard.count}/{self.guard.max_daily})")
+        return self._call_api(model, system_prompt, user_message, max_tokens)
+
+    @_retry_decorator
+    def _call_api(self, model: str, system_prompt: str, user_message: str, max_tokens: int) -> str:
+        """Actual API call wrapped with tenacity retry (exponential backoff, max 5 attempts)."""
         response = self.client.messages.create(
             model=model,
             max_tokens=max_tokens,
@@ -118,6 +150,17 @@ class AIClient:
             return None
         self.guard.record_call()
         print(f"  [AI+Tools] Calling {self.model} (call #{self.guard.count}/{self.guard.max_daily})")
+        return self._call_api_with_tools(system_prompt, user_message, tools, max_tokens)
+
+    @_retry_decorator
+    def _call_api_with_tools(
+        self,
+        system_prompt: str,
+        user_message: str,
+        tools: list[dict],
+        max_tokens: int,
+    ) -> anthropic.types.Message:
+        """Actual tool-use API call wrapped with tenacity retry."""
         return self.client.messages.create(
             model=self.model,
             max_tokens=max_tokens,

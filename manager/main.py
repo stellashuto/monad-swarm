@@ -25,6 +25,7 @@ import time
 import json
 import signal
 import hashlib
+import traceback
 import requests
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,7 @@ from shared.chain import (
     get_web3, get_account, get_balance_mon, send_mon,
     deploy_token_monad_fun,
 )
+from shared.event_logger import log_deploy_decision, log_token_deployed
 
 
 # ═══════════════════════════════════════════════
@@ -447,148 +449,158 @@ def main():
         cycle += 1
         now = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
-        # ── Phase 0: Gather data (FREE) ──────────────────────
-        tokens = fetch_gmgn_trends()
-        trends = fetch_viral_trends()
-        ticker_candidates = derive_ticker_candidates(trends)
-        fingerprint = compute_trend_fingerprint(tokens, trends)
+        try:
+            # ── Phase 0: Gather data (FREE) ──────────────────────
+            tokens = fetch_gmgn_trends()
+            trends = fetch_viral_trends()
+            ticker_candidates = derive_ticker_candidates(trends)
+            fingerprint = compute_trend_fingerprint(tokens, trends)
 
-        # ── Phase 1: Fingerprint gate (zero cost) ────────────
-        if fingerprint == state.get("last_trend_hash", ""):
-            current_interval = min(current_interval + 30, INTERVAL_IDLE)
-            if cycle % 5 == 1:
-                print(f"[{now}] Cycle {cycle} — No data change. Interval: {current_interval}s")
-            time.sleep(current_interval)
-            continue
+            # ── Phase 1: Fingerprint gate (zero cost) ────────────
+            if fingerprint == state.get("last_trend_hash", ""):
+                current_interval = min(current_interval + 30, INTERVAL_IDLE)
+                if cycle % 5 == 1:
+                    print(f"[{now}] Cycle {cycle} — No data change. Interval: {current_interval}s")
+                time.sleep(current_interval)
+                continue
 
-        # Change detected → accelerate polling
-        current_interval = INTERVAL_ACTIVE
-        state["last_trend_hash"] = fingerprint
-        state["last_interval"] = current_interval
+            # Change detected → accelerate polling
+            current_interval = INTERVAL_ACTIVE
+            state["last_trend_hash"] = fingerprint
+            state["last_interval"] = current_interval
 
-        print(f"\n[{now}] ═══ Cycle {cycle} — CHANGE DETECTED (fp: {fingerprint[:8]}) ═══")
-        print(f"  Viral topics  : {', '.join(trends[:8]) if trends else '(none)'}")
-        print(f"  GMGN tokens   : {len(tokens)} trending")
-        print(f"  Ticker candidates: {', '.join('$'+t for t in ticker_candidates[:6])}")
+            print(f"\n[{now}] ═══ Cycle {cycle} — CHANGE DETECTED (fp: {fingerprint[:8]}) ═══")
+            print(f"  Viral topics  : {', '.join(trends[:8]) if trends else '(none)'}")
+            print(f"  GMGN tokens   : {len(tokens)} trending")
+            print(f"  Ticker candidates: {', '.join('$'+t for t in ticker_candidates[:6])}")
 
-        # ── Phase 2: Stage 1 — Haiku Screening ──────────────
-        print(f"\n  [STAGE 1] Urgency screening via {SCREENING_MODEL}...")
-        screening = screen_urgency(ai, tokens, trends, ticker_candidates)
+            # ── Phase 2: Stage 1 — Haiku Screening ──────────────
+            print(f"\n  [STAGE 1] Urgency screening via {SCREENING_MODEL}...")
+            screening = screen_urgency(ai, tokens, trends, ticker_candidates)
 
-        if not screening:
-            print("  [STAGE 1] Screening failed (budget or parse error). Skipping.")
-            save_state(state)
-            time.sleep(current_interval)
-            continue
+            if not screening:
+                print("  [STAGE 1] Screening failed (budget or parse error). Skipping.")
+                save_state(state)
+                time.sleep(current_interval)
+                continue
 
-        urgency = screening.get("urgency", 0)
-        viral_potential = screening.get("viral_potential", "LOW")
-        best_ticker = screening.get("best_ticker", "N/A")
-        top_word = screening.get("top_viral_word", "N/A")
+            urgency = screening.get("urgency", 0)
+            viral_potential = screening.get("viral_potential", "LOW")
+            best_ticker = screening.get("best_ticker", "N/A")
+            top_word = screening.get("top_viral_word", "N/A")
 
-        print(f"  [STAGE 1] Urgency    : {urgency}/100")
-        print(f"  [STAGE 1] Viral      : {viral_potential}")
-        print(f"  [STAGE 1] Top word   : {top_word}")
-        print(f"  [STAGE 1] Best ticker: {best_ticker}")
-        print(f"  [STAGE 1] Reason     : {screening.get('reason', 'N/A')}")
+            print(f"  [STAGE 1] Urgency    : {urgency}/100")
+            print(f"  [STAGE 1] Viral      : {viral_potential}")
+            print(f"  [STAGE 1] Top word   : {top_word}")
+            print(f"  [STAGE 1] Best ticker: {best_ticker}")
+            print(f"  [STAGE 1] Reason     : {screening.get('reason', 'N/A')}")
 
-        if urgency < URGENCY_THRESHOLD:
-            print(f"  [GATE] Urgency {urgency} < {URGENCY_THRESHOLD}. Sonnet NOT invoked. Cost saved.")
-            print(f"  [VIRAL] Potential: {viral_potential} | ${best_ticker} from '{top_word}'")
-            current_interval = min(INTERVAL_ACTIVE * 3, INTERVAL_IDLE)
-            save_state(state)
-            time.sleep(current_interval)
-            continue
+            if urgency < URGENCY_THRESHOLD:
+                print(f"  [GATE] Urgency {urgency} < {URGENCY_THRESHOLD}. Sonnet NOT invoked. Cost saved.")
+                print(f"  [VIRAL] Potential: {viral_potential} | ${best_ticker} from '{top_word}'")
+                current_interval = min(INTERVAL_ACTIVE * 3, INTERVAL_IDLE)
+                save_state(state)
+                time.sleep(current_interval)
+                continue
 
-        # ── Phase 3: Stage 2 — Sonnet Strategy ──────────────
-        print(f"\n  [STAGE 2] Deep analysis via {STRATEGY_MODEL}...")
-        strategy = analyze_strategy(ai, tokens, trends, screening)
+            # ── Phase 3: Stage 2 — Sonnet Strategy ──────────────
+            print(f"\n  [STAGE 2] Deep analysis via {STRATEGY_MODEL}...")
+            strategy = analyze_strategy(ai, tokens, trends, screening)
 
-        if not strategy:
-            print("  [STAGE 2] Strategy failed. Skipping.")
-            save_state(state)
-            time.sleep(current_interval)
-            continue
+            if not strategy:
+                print("  [STAGE 2] Strategy failed. Skipping.")
+                save_state(state)
+                time.sleep(current_interval)
+                continue
 
-        action = strategy.get("action", "WAIT")
-        confidence = strategy.get("confidence", 0)
-        viral_score = strategy.get("viral_score", 0)
-        token_name = strategy.get("token_name", "MonadMeme")
-        ticker = strategy.get("ticker", "MEME").strip("$").upper()
-        narrative = strategy.get("narrative", "N/A")
-        hype_window = strategy.get("estimated_hype_window_hours", "?")
+            action = strategy.get("action", "WAIT")
+            confidence = strategy.get("confidence", 0)
+            viral_score = strategy.get("viral_score", 0)
+            token_name = strategy.get("token_name", "MonadMeme")
+            ticker = strategy.get("ticker", "MEME").strip("$").upper()
+            narrative = strategy.get("narrative", "N/A")
+            hype_window = strategy.get("estimated_hype_window_hours", "?")
 
-        print(f"  [STAGE 2] Action     : {action}")
-        print(f"  [STAGE 2] Confidence : {confidence}")
-        print(f"  [STAGE 2] Viral score: {viral_score}")
-        print(f"  [STAGE 2] Token      : {token_name} (${ticker})")
-        print(f"  [STAGE 2] Narrative  : {narrative}")
-        print(f"  [STAGE 2] Hype window: ~{hype_window}h")
-        print(f"  [STAGE 2] Reasoning  : {strategy.get('reasoning', 'N/A')}")
+            print(f"  [STAGE 2] Action     : {action}")
+            print(f"  [STAGE 2] Confidence : {confidence}")
+            print(f"  [STAGE 2] Viral score: {viral_score}")
+            print(f"  [STAGE 2] Token      : {token_name} (${ticker})")
+            print(f"  [STAGE 2] Narrative  : {narrative}")
+            print(f"  [STAGE 2] Hype window: ~{hype_window}h")
+            print(f"  [STAGE 2] Reasoning  : {strategy.get('reasoning', 'N/A')}")
 
-        # ── Phase 4: Execute action ──────────────────────────
-        if action == "DEPLOY" and confidence >= DEPLOY_CONFIDENCE:
-            description = strategy.get("description", f"AI-minted token inspired by: {narrative}")
+            # ── Phase 4: Execute action ──────────────────────────
+            if action == "DEPLOY" and confidence >= DEPLOY_CONFIDENCE:
+                description = strategy.get("description", f"AI-minted token inspired by: {narrative}")
 
-            print(f"\n  >>> DEPLOY TRIGGERED: {token_name} (${ticker})")
-            print(f"  >>> Confidence: {confidence} | Viral: {viral_score}")
+                print(f"\n  >>> DEPLOY TRIGGERED: {token_name} (${ticker})")
+                print(f"  >>> Confidence: {confidence} | Viral: {viral_score}")
+                log_deploy_decision(ticker, token_name, confidence, strategy.get("reasoning", "N/A"))
 
-            result = deploy_token(w3, account, token_name, ticker, description)
+                result = deploy_token(w3, account, token_name, ticker, description)
 
-            if result["success"]:
-                token_addr = result.get("token_address")
-                state["deployed_tokens"].append({
-                    "name": token_name,
-                    "ticker": ticker,
-                    "narrative": narrative,
-                    "confidence": confidence,
-                    "viral_score": viral_score,
-                    "time": datetime.now(timezone.utc).isoformat(),
-                    "address": token_addr,
-                    "tx_hash": result.get("tx_hash"),
-                })
+                if result["success"]:
+                    token_addr = result.get("token_address")
+                    log_token_deployed(ticker, token_addr or "unknown", result.get("tx_hash", "N/A"))
+                    state["deployed_tokens"].append({
+                        "name": token_name,
+                        "ticker": ticker,
+                        "narrative": narrative,
+                        "confidence": confidence,
+                        "viral_score": viral_score,
+                        "time": datetime.now(timezone.utc).isoformat(),
+                        "address": token_addr,
+                        "tx_hash": result.get("tx_hash"),
+                    })
 
-                # Coordinate with Trader for initial liquidity support
-                if token_addr and trader_address:
-                    balance = get_balance_mon(w3, account.address)
-                    fund_amount = min(balance * 0.1, float(os.getenv("MAX_FUND_AMOUNT_MON", 0.5)))
-                    if fund_amount > 0.01:
-                        # Write coordination file BEFORE funding so Trader knows what to buy
-                        coord_data = {
-                            "token_address": token_addr,
-                            "token_name": token_name,
-                            "ticker": ticker,
-                            "narrative": narrative,
-                            "fund_amount_mon": fund_amount,
-                            "deploy_time": datetime.now(timezone.utc).isoformat(),
-                            "status": "PENDING_BUY",
-                        }
-                        COORDINATION_FILE.write_text(json.dumps(coord_data, indent=2))
-                        print(f"  [COORD] Coordination file written: {token_addr}")
+                    # Coordinate with Trader for initial liquidity support
+                    if token_addr and trader_address:
+                        balance = get_balance_mon(w3, account.address)
+                        fund_amount = min(balance * 0.1, float(os.getenv("MAX_FUND_AMOUNT_MON", 0.5)))
+                        if fund_amount > 0.01:
+                            # Write coordination file BEFORE funding so Trader knows what to buy
+                            coord_data = {
+                                "token_address": token_addr,
+                                "token_name": token_name,
+                                "ticker": ticker,
+                                "narrative": narrative,
+                                "fund_amount_mon": fund_amount,
+                                "deploy_time": datetime.now(timezone.utc).isoformat(),
+                                "status": "PENDING_BUY",
+                            }
+                            COORDINATION_FILE.write_text(json.dumps(coord_data, indent=2))
+                            print(f"  [COORD] Coordination file written: {token_addr}")
 
-                        coord = coordinate_market_making(
-                            ai, w3, account, trader_address, token_addr, fund_amount
-                        )
-                        if coord.get("success"):
-                            state["total_funded_mon"] += fund_amount
-                            print(f"  [COORD] Trader funded: {fund_amount:.4f} MON for initial buy support")
+                            coord = coordinate_market_making(
+                                ai, w3, account, trader_address, token_addr, fund_amount
+                            )
+                            if coord.get("success"):
+                                state["total_funded_mon"] += fund_amount
+                                print(f"  [COORD] Trader funded: {fund_amount:.4f} MON for initial buy support")
+                            else:
+                                print(f"  [COORD] Funding failed: {coord.get('error', 'unknown')}")
                         else:
-                            print(f"  [COORD] Funding failed: {coord.get('error', 'unknown')}")
-                    else:
-                        print("  [COORD] Insufficient balance to fund Trader.")
-                elif not token_addr:
-                    print("  [COORD] Token address not captured — manual coordination needed.")
+                            print("  [COORD] Insufficient balance to fund Trader.")
+                    elif not token_addr:
+                        print("  [COORD] Token address not captured — manual coordination needed.")
+                else:
+                    print(f"  [DEPLOY] Failed: {result.get('error')}")
+
+            elif action == "MONITOR":
+                print(f"  [ACTION] MONITOR — Watching '{top_word}' (${ticker}) for escalation")
+                print(f"  [VIRAL] Potential: {viral_potential} | Confidence: {confidence}")
             else:
-                print(f"  [DEPLOY] Failed: {result.get('error')}")
+                print(f"  [ACTION] WAIT — Confidence {confidence} below {DEPLOY_CONFIDENCE} threshold")
+                print(f"  [VIRAL] Tracking: '{top_word}' | Potential: ${ticker}")
 
-        elif action == "MONITOR":
-            print(f"  [ACTION] MONITOR — Watching '{top_word}' (${ticker}) for escalation")
-            print(f"  [VIRAL] Potential: {viral_potential} | Confidence: {confidence}")
-        else:
-            print(f"  [ACTION] WAIT — Confidence {confidence} below {DEPLOY_CONFIDENCE} threshold")
-            print(f"  [VIRAL] Tracking: '{top_word}' | Potential: ${ticker}")
+            save_state(state)
 
-        save_state(state)
+        except Exception as exc:
+            print(f"\n[{now}] [ERROR] Cycle {cycle} — Unhandled exception: {exc}")
+            traceback.print_exc()
+            print(f"  Recovering... will resume in {current_interval}s")
+            save_state(state)
+
         time.sleep(current_interval)
 
     # Shutdown summary

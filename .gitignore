@@ -7,6 +7,7 @@ venv/
 node_modules/
 nohup.out
 *.log
+!logs/.gitkeep
 .cloudscraper/
 /tmp/manager_state.json
 /tmp/trader_state.json

@@ -32,6 +32,7 @@ from shared.chain import (
     swap_mon_for_token, swap_token_for_mon,
     ERC20_ABI,
 )
+from shared.event_logger import log_initial_swap
 from web3 import Web3
 
 
@@ -361,6 +362,7 @@ def main():
                         print(f"  [TRADE] Buying ${coord.get('ticker', '???')}: {buy_amount:.4f} MON → {target_token[:16]}...")
                         tx = swap_mon_for_token(w3, account, DEX_ROUTER, target_token, buy_amount)
                         print(f"  [TRADE] Swap tx: {tx}")
+                        log_initial_swap(coord.get("ticker", "???"), target_token, buy_amount, tx)
                         mark_coordination_done()
                     except Exception as e:
                         print(f"  [TRADE] Swap failed: {e}")
