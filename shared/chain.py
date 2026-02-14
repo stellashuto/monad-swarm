@@ -73,44 +73,64 @@ def sanitize_token_name(name: str) -> str:
     return truncated.rstrip()
 
 
-def validate_ticker(ticker: str) -> str:
+def validate_ticker(ticker: str, max_length: int = 5) -> str:
     """Validate and sanitize a ticker symbol.
 
     Rules:
       - Strip leading '$' if present
-      - Remove any non-alpha characters (letters only)
+      - Remove any non-alphanumeric characters
       - Uppercase
-      - Must be 3–5 characters; pad with 'X' or truncate as needed
+      - Must be at least 3 characters; pad with 'X' if shorter
+      - Truncate to max_length
 
     Returns the sanitized ticker.
     Raises ValueError if nothing usable remains after cleaning.
     """
-    cleaned = re.sub(r"[^A-Za-z]", "", ticker.strip().lstrip("$")).upper()
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", ticker.strip().lstrip("$")).upper()
     if not cleaned:
-        raise ValueError(f"Ticker '{ticker}' contains no valid alpha characters")
+        raise ValueError(f"Ticker '{ticker}' contains no valid characters")
     if len(cleaned) < 3:
         cleaned = cleaned.ljust(3, "X")
-    if len(cleaned) > 5:
-        cleaned = cleaned[:5]
+    if len(cleaned) > max_length:
+        cleaned = cleaned[:max_length]
     return cleaned
 
 
-def make_unique_ticker(ticker: str, existing_tickers: set[str]) -> str:
-    """If `ticker` collides with `existing_tickers`, append a random uppercase letter.
+def make_unique_ticker(ticker: str, existing_tickers: set[str] | None = None) -> str:
+    """Generate a globally unique ticker by appending YY + 2 random letters.
 
-    Retries up to 26 times to find a unique variant.
+    Naming convention: BASE(3-5 alpha) + YY(2-digit year) + RR(2 random uppercase)
+    Example: HINT → HINT26XY, DOGE → DOGE26AB
+
+    This proactively avoids the 0x8d6be2a7 (symbol duplicate) revert by
+    ensuring every deployed ticker is unique, regardless of on-chain state.
+    Retries up to 50 times if the generated ticker collides with `existing_tickers`.
     """
-    ticker = validate_ticker(ticker)
-    if ticker not in existing_tickers:
-        return ticker
-    for _ in range(26):
-        suffix = random.choice(string.ascii_uppercase)
-        candidate = (ticker[:4] + suffix) if len(ticker) >= 5 else (ticker + suffix)
-        candidate = candidate[:5]
-        if candidate not in existing_tickers:
-            logger.info(f"Ticker collision: '{ticker}' → '{candidate}'")
+    from datetime import datetime, timezone
+
+    # Sanitize base ticker to alpha-only, 3-5 chars
+    base = re.sub(r"[^A-Za-z]", "", ticker.strip().lstrip("$")).upper()
+    if not base:
+        raise ValueError(f"Ticker '{ticker}' contains no valid alpha characters")
+    if len(base) < 3:
+        base = base.ljust(3, "X")
+    base = base[:5]
+
+    year_suffix = datetime.now(timezone.utc).strftime("%y")  # e.g. "26"
+    existing = existing_tickers or set()
+
+    for _ in range(50):
+        rand_chars = "".join(random.choices(string.ascii_uppercase, k=2))
+        candidate = f"{base}{year_suffix}{rand_chars}"
+        if candidate not in existing:
+            if base + year_suffix + rand_chars != ticker:
+                logger.info(f"Unique ticker generated: '{ticker}' → '{candidate}'")
             return candidate
-    return ticker
+
+    # Extremely unlikely fallback: add extra randomness
+    fallback = f"{base[:3]}{year_suffix}{''.join(random.choices(string.ascii_uppercase, k=3))}"
+    logger.warning(f"Ticker collision exhausted 50 attempts, fallback: '{fallback}'")
+    return fallback
 
 
 # ─── Native MON Transfers ────────────────────────────────
@@ -340,6 +360,43 @@ def _get_priority_fee(w3: Web3, boost_pct: float = 0.20) -> int:
         return 0
 
 
+def _check_sufficient_balance(
+    w3: Web3,
+    account_address: str,
+    initial_liquidity_wei: int,
+    gas_limit: int,
+    max_fee_per_gas: int,
+) -> dict:
+    """Strict pre-deployment balance check (MIP-3/4/5 compliance).
+
+    With MONAD_NINE upgrade's real-time reserved balance checks,
+    the wallet must hold enough MON to cover:
+      - initial_liquidity (msg.value sent with create())
+      - max possible gas cost (gas_limit × max_fee_per_gas)
+      - a safety margin (10%) for nonce/fee fluctuations
+
+    Returns {"ok": bool, "balance_wei": int, "required_wei": int, "shortfall_mon": float}.
+    """
+    balance_wei = w3.eth.get_balance(Web3.to_checksum_address(account_address))
+    max_gas_cost_wei = gas_limit * max_fee_per_gas
+    required_wei = initial_liquidity_wei + max_gas_cost_wei
+    # 10% safety margin
+    required_with_margin = int(required_wei * 1.10)
+
+    if balance_wei >= required_with_margin:
+        return {"ok": True, "balance_wei": balance_wei, "required_wei": required_with_margin, "shortfall_mon": 0.0}
+
+    shortfall = float(Web3.from_wei(required_with_margin - balance_wei, "ether"))
+    logger.warning(
+        f"[BALANCE] Insufficient: {Web3.from_wei(balance_wei, 'ether'):.6f} MON "
+        f"< required {Web3.from_wei(required_with_margin, 'ether'):.6f} MON "
+        f"(liquidity={Web3.from_wei(initial_liquidity_wei, 'ether'):.4f}, "
+        f"max_gas={Web3.from_wei(max_gas_cost_wei, 'ether'):.6f}, +10% margin). "
+        f"Shortfall: {shortfall:.6f} MON"
+    )
+    return {"ok": False, "balance_wei": balance_wei, "required_wei": required_with_margin, "shortfall_mon": shortfall}
+
+
 def deploy_token_monad_fun(
     w3: Web3,
     account: Account,
@@ -355,10 +412,11 @@ def deploy_token_monad_fun(
     Sends `initial_liquidity_mon` as msg.value (deploy fee + initial buy).
     The `description` is passed as tokenURI metadata.
 
-    Features:
-      - Dynamic gas estimation (eth_estimateGas × 1.3)
+    Features (MIP-3/4/5 compliant):
+      - Dynamic gas estimation (eth_estimateGas × 1.3) — trusts linearized memory cost
       - Priority fee boost (+20%)
       - Pre-broadcast simulation via eth_call
+      - Strict balance check: balance >= liquidity + max_gas + 10% margin
       - Initial liquidity default: 0.1 MON
 
     Returns:
@@ -367,7 +425,9 @@ def deploy_token_monad_fun(
     try:
         # ── Sanitize parameters before on-chain call ──
         token_name = sanitize_token_name(token_name)
-        ticker = validate_ticker(ticker)
+        # Accept pre-validated tickers (including YY+2random suffixed ones)
+        # Only validate base format; allow up to 9 chars for suffixed tickers
+        ticker = validate_ticker(ticker, max_length=9)
 
         router = w3.eth.contract(
             address=Web3.to_checksum_address(factory_address),
@@ -419,6 +479,34 @@ def deploy_token_monad_fun(
             "value": tx.get("value", 0),
         })
         tx["gas"] = gas_limit
+
+        # ── Strict balance check (MIP-3/4/5: real-time reserved balance) ──
+        # Determine effective max fee per gas for cost calculation
+        effective_fee = tx.get("maxFeePerGas", tx.get("gasPrice", w3.eth.gas_price))
+        bal_check = _check_sufficient_balance(
+            w3, account.address, value_wei, gas_limit, effective_fee
+        )
+        if not bal_check["ok"]:
+            balance_mon = float(Web3.from_wei(bal_check["balance_wei"], "ether"))
+            required_mon = float(Web3.from_wei(bal_check["required_wei"], "ether"))
+            err_msg = (
+                f"Insufficient MON balance for deployment: "
+                f"{balance_mon:.6f} MON available, {required_mon:.6f} MON required "
+                f"(liquidity + gas + 10% margin). "
+                f"Shortfall: {bal_check['shortfall_mon']:.6f} MON"
+            )
+            logger.error(f"[DEPLOY] {err_msg}")
+            print(f"  [BALANCE] *** INSUFFICIENT *** {err_msg}")
+            return {
+                "success": False,
+                "token_address": None,
+                "tx_hash": None,
+                "error": err_msg,
+            }
+        logger.info(
+            f"[BALANCE] OK — {Web3.from_wei(bal_check['balance_wei'], 'ether'):.6f} MON "
+            f">= {Web3.from_wei(bal_check['required_wei'], 'ether'):.6f} MON required"
+        )
 
         # ── Pre-broadcast simulation (eth_call) ──
         sim = _simulate_deployment(w3, tx)

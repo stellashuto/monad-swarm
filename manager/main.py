@@ -388,7 +388,8 @@ def deploy_token(w3, account, token_name: str, ticker: str, description: str, st
     """Deploy a token on Nad.fun via BondingCurveRouter.create().
 
     Uses wallet MON for initial liquidity seeding.
-    Applies collision avoidance for ticker symbols.
+    Applies proactive deduplication: always appends YY+2random to ticker
+    (e.g., HINT → HINT26XY) to avoid 0x8d6be2a7 symbol duplicate revert.
     Returns {"success": bool, "token_address": str|None, "tx_hash": str|None, "error": str|None}
     """
     # ── Sanitize parameters ──
@@ -399,7 +400,9 @@ def deploy_token(w3, account, token_name: str, ticker: str, description: str, st
 
     try:
         existing = _get_deployed_tickers(state) if state else set()
+        original_ticker = ticker
         ticker = make_unique_ticker(ticker, existing)
+        print(f"  [DEPLOY] Ticker uniquified: ${original_ticker} → ${ticker}")
     except ValueError as e:
         return {"success": False, "token_address": None, "tx_hash": None, "error": str(e)}
 
@@ -485,13 +488,11 @@ def coordinate_market_making(
 # ═══════════════════════════════════════════════
 
 def _generate_test_ticker() -> str:
-    """Generate a unique test ticker: TST + 3 random uppercase letters (e.g. TSTXYZ)."""
-    import random
-    import string
-    suffix = "".join(random.choices(string.ascii_uppercase, k=3))
-    # Ticker must be 3-5 chars; "TST" prefix is already valid but we want uniqueness
-    # Use first 2 chars of prefix + 3 random = 5 chars total for maximum uniqueness
-    return f"TS{suffix}"
+    """Generate a unique test ticker using the YY+2random convention.
+
+    Example: TST → TST26AB (ensures uniqueness via make_unique_ticker).
+    """
+    return make_unique_ticker("TST")
 
 
 # Known revert selectors that indicate a duplicate / already-exists condition
