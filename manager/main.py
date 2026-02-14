@@ -56,7 +56,7 @@ MONAD_FUN_FACTORY = os.getenv(
     "MONAD_FUN_FACTORY_ADDRESS",
     NADFUN_ROUTER_DEFAULT,
 )
-INITIAL_LIQUIDITY_MON = float(os.getenv("INITIAL_LIQUIDITY_MON", "0.1"))
+INITIAL_LIQUIDITY_MON = float(os.getenv("INITIAL_LIQUIDITY_MON", "1.0"))
 COORDINATION_FILE = Path("/tmp/manager_trader_coordination.json")
 
 

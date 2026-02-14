@@ -333,7 +333,7 @@ def _simulate_deployment(w3: Web3, tx: dict) -> dict:
         return {"ok": False, "error": revert_reason, "revert_selector": revert_selector}
 
 
-def _estimate_gas_dynamic(w3: Web3, tx_params: dict, multiplier: float = 1.3) -> int:
+def _estimate_gas_dynamic(w3: Web3, tx_params: dict, multiplier: float = 1.5) -> int:
     """Estimate gas dynamically via eth_estimateGas and apply a safety multiplier.
 
     Falls back to 3_900_000 if estimation fails.
@@ -404,7 +404,7 @@ def deploy_token_monad_fun(
     token_name: str,
     ticker: str,
     description: str,
-    initial_liquidity_mon: float = 0.1,
+    initial_liquidity_mon: float = 1.0,
     total_supply: int = 1_000_000_000,
 ) -> dict:
     """Deploy a new token via Nad.fun BondingCurveRouter.create().
@@ -413,11 +413,11 @@ def deploy_token_monad_fun(
     The `description` is passed as tokenURI metadata.
 
     Features (MIP-3/4/5 compliant):
-      - Dynamic gas estimation (eth_estimateGas × 1.3) — trusts linearized memory cost
+      - Dynamic gas estimation (eth_estimateGas × 1.5) — trusts linearized memory cost
       - Priority fee boost (+20%)
       - Pre-broadcast simulation via eth_call
       - Strict balance check: balance >= liquidity + max_gas + 10% margin
-      - Initial liquidity default: 0.1 MON
+      - Initial liquidity default: 1.0 MON
 
     Returns:
         {"success": bool, "token_address": str|None, "tx_hash": str|None, "error": str|None}
@@ -471,7 +471,7 @@ def deploy_token_monad_fun(
         )
         tx = fn_call.build_transaction({**base_tx, "gas": 5_000_000})
 
-        # ── Dynamic gas estimation (eth_estimateGas × 1.3) ──
+        # ── Dynamic gas estimation (eth_estimateGas × 1.5) ──
         gas_limit = _estimate_gas_dynamic(w3, {
             "from": tx["from"],
             "to": tx["to"],
