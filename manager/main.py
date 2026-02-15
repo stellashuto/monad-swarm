@@ -56,7 +56,7 @@ MONAD_FUN_FACTORY = os.getenv(
     "MONAD_FUN_FACTORY_ADDRESS",
     NADFUN_ROUTER_DEFAULT,
 )
-INITIAL_LIQUIDITY_MON = float(os.getenv("INITIAL_LIQUIDITY_MON", "1.0"))
+INITIAL_LIQUIDITY_MON = float(os.getenv("INITIAL_LIQUIDITY_MON", "0.01"))
 COORDINATION_FILE = Path("/tmp/manager_trader_coordination.json")
 
 
@@ -310,7 +310,7 @@ Guidelines:
 - Niche and emerging trends can be valuable as fresh cultural narratives
 - Evaluate whether the trend has enough momentum to sustain community interest
 - Non-crypto cultural moments are especially interesting as untapped on-chain narratives""",
-        max_tokens=256,
+        max_tokens=512,
     )
 
 
@@ -466,7 +466,7 @@ def coordinate_market_making(
                 f"- Strategy: Buy immediately for initial liquidity support, 15% stop-loss, take profit at 2x\n"
                 f"- Return profits minus 20% fee to manager"
             ),
-            max_tokens=200,
+            max_tokens=400,
         )
 
         return {

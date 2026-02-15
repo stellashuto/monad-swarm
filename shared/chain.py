@@ -279,6 +279,9 @@ def swap_mon_for_token(
 # Default factory address — used when MONAD_FUN_FACTORY_ADDRESS is not in .env
 NADFUN_ROUTER_DEFAULT = "0x6F6B8F1a20703309951a5127c45B49b1CD981A22"
 
+# Nad.fun mainnet deploy fee (required in msg.value on top of initial buy)
+NADFUN_DEPLOY_FEE_MON = 10
+
 MONAD_FUN_FACTORY_ABI = json.loads("""[
   {
     "type": "function",
@@ -319,7 +322,7 @@ def _simulate_deployment(w3: Web3, tx: dict) -> dict:
             "to": tx["to"],
             "data": tx.get("data", b""),
             "value": tx.get("value", 0),
-            "gas": tx.get("gas", 5_000_000),
+            "gas": tx.get("gas", 10_000_000),
         })
         return {"ok": True, "error": None, "revert_selector": None}
     except Exception as e:
@@ -336,7 +339,7 @@ def _simulate_deployment(w3: Web3, tx: dict) -> dict:
 def _estimate_gas_dynamic(w3: Web3, tx_params: dict, multiplier: float = 1.5) -> int:
     """Estimate gas dynamically via eth_estimateGas and apply a safety multiplier.
 
-    Falls back to 3_900_000 if estimation fails.
+    Falls back to 10_000_000 if estimation fails.
     """
     try:
         estimated = w3.eth.estimate_gas(tx_params)
@@ -344,8 +347,8 @@ def _estimate_gas_dynamic(w3: Web3, tx_params: dict, multiplier: float = 1.5) ->
         logger.info(f"[GAS] estimateGas={estimated}, ×{multiplier}={final}")
         return final
     except Exception as e:
-        logger.warning(f"[GAS] estimateGas failed ({e}), falling back to 3_900_000")
-        return 3_900_000
+        logger.warning(f"[GAS] estimateGas failed ({e}), falling back to 10_000_000")
+        return 10_000_000
 
 
 def _get_priority_fee(w3: Web3, boost_pct: float = 0.20) -> int:
@@ -404,20 +407,23 @@ def deploy_token_monad_fun(
     token_name: str,
     ticker: str,
     description: str,
-    initial_liquidity_mon: float = 1.0,
+    initial_liquidity_mon: float = 0.01,
     total_supply: int = 1_000_000_000,
+    max_retries: int = 3,
 ) -> dict:
     """Deploy a new token via Nad.fun BondingCurveRouter.create().
 
-    Sends `initial_liquidity_mon` as msg.value (deploy fee + initial buy).
+    Sends `initial_liquidity_mon` as msg.value (pure swap amount, no fee markup).
     The `description` is passed as tokenURI metadata.
 
     Features (MIP-3/4/5 compliant):
       - Dynamic gas estimation (eth_estimateGas × 1.5) — trusts linearized memory cost
       - Priority fee boost (+20%)
       - Pre-broadcast simulation via eth_call
-      - Strict balance check: balance >= liquidity + max_gas + 10% margin
-      - Initial liquidity default: 1.0 MON
+      - Strict balance check: balance >= liquidity + deploy_fee + max_gas + 10% margin
+      - Initial liquidity default: 0.01 MON (safe minimum)
+      - Auto-retry with halved liquidity on simulation revert (max 3 attempts)
+      - msg.value = NADFUN_DEPLOY_FEE_MON (10 MON) + initial liquidity
 
     Returns:
         {"success": bool, "token_address": str|None, "tx_hash": str|None, "error": str|None}
@@ -433,124 +439,159 @@ def deploy_token_monad_fun(
             address=Web3.to_checksum_address(factory_address),
             abi=MONAD_FUN_FACTORY_ABI,
         )
-        value_wei = Web3.to_wei(initial_liquidity_mon, "ether")
 
-        # Generate a unique salt from token name + current timestamp
-        salt = Web3.keccak(text=f"{token_name}-{ticker}-{int(time.time())}")
-        # actionId 0 = standard create
-        action_id = 0
-
-        nonce = w3.eth.get_transaction_count(account.address)
+        # actionId 1 = standard create (actionId 0 triggers InvalidActionId revert)
+        action_id = 1
         chain_id = get_chain_id()
 
-        # Build base tx params for gas estimation
-        base_tx = {
-            "from": account.address,
-            "value": value_wei,
-            "nonce": nonce,
-            "chainId": chain_id,
-        }
+        # ── Auto-retry loop: halve liquidity on simulation revert ──
+        current_liquidity_mon = initial_liquidity_mon
+        last_error = None
 
-        # Try EIP-1559 fee model first, fallback to legacy gasPrice
-        priority_fee = _get_priority_fee(w3)
-        if priority_fee > 0:
-            try:
-                latest_block = w3.eth.get_block("latest")
-                base_fee_per_gas = latest_block.get("baseFeePerGas", 0)
-                max_fee = base_fee_per_gas * 2 + priority_fee
-                base_tx["maxPriorityFeePerGas"] = priority_fee
-                base_tx["maxFeePerGas"] = max_fee
-            except Exception:
-                base_tx["gasPrice"] = int(w3.eth.gas_price * 1.2)
-        else:
-            base_tx["gasPrice"] = int(w3.eth.gas_price * 1.2)
-
-        # Build the function call
-        fn_call = router.functions.create(
-            (token_name, ticker, description, 0, salt, action_id)
-        )
-        tx = fn_call.build_transaction({**base_tx, "gas": 5_000_000})
-
-        # ── Dynamic gas estimation (eth_estimateGas × 1.5) ──
-        gas_limit = _estimate_gas_dynamic(w3, {
-            "from": tx["from"],
-            "to": tx["to"],
-            "data": tx.get("data", b""),
-            "value": tx.get("value", 0),
-        })
-        tx["gas"] = gas_limit
-
-        # ── Strict balance check (MIP-3/4/5: real-time reserved balance) ──
-        # Determine effective max fee per gas for cost calculation
-        effective_fee = tx.get("maxFeePerGas", tx.get("gasPrice", w3.eth.gas_price))
-        bal_check = _check_sufficient_balance(
-            w3, account.address, value_wei, gas_limit, effective_fee
-        )
-        if not bal_check["ok"]:
-            balance_mon = float(Web3.from_wei(bal_check["balance_wei"], "ether"))
-            required_mon = float(Web3.from_wei(bal_check["required_wei"], "ether"))
-            err_msg = (
-                f"Insufficient MON balance for deployment: "
-                f"{balance_mon:.6f} MON available, {required_mon:.6f} MON required "
-                f"(liquidity + gas + 10% margin). "
-                f"Shortfall: {bal_check['shortfall_mon']:.6f} MON"
+        for attempt in range(1, max_retries + 1):
+            logger.info(
+                f"[DEPLOY] Attempt {attempt}/{max_retries} — "
+                f"liquidity={current_liquidity_mon:.6f} MON"
             )
-            logger.error(f"[DEPLOY] {err_msg}")
-            print(f"  [BALANCE] *** INSUFFICIENT *** {err_msg}")
-            return {
-                "success": False,
-                "token_address": None,
-                "tx_hash": None,
-                "error": err_msg,
+            print(
+                f"  [DEPLOY] Attempt {attempt}/{max_retries} — "
+                f"liquidity: {current_liquidity_mon:.6f} MON"
+            )
+
+            # msg.value must cover deploy fee (10 MON) + initial buy liquidity
+            value_wei = Web3.to_wei(
+                NADFUN_DEPLOY_FEE_MON + current_liquidity_mon, "ether"
+            )
+
+            # Generate a unique salt per attempt
+            salt = Web3.keccak(
+                text=f"{token_name}-{ticker}-{int(time.time())}-{attempt}"
+            )
+
+            nonce = w3.eth.get_transaction_count(account.address)
+
+            # Build base tx params for gas estimation
+            base_tx = {
+                "from": account.address,
+                "value": int(value_wei),  # deploy fee (10 MON) + liquidity
+                "nonce": nonce,
+                "chainId": chain_id,
             }
-        logger.info(
-            f"[BALANCE] OK — {Web3.from_wei(bal_check['balance_wei'], 'ether'):.6f} MON "
-            f">= {Web3.from_wei(bal_check['required_wei'], 'ether'):.6f} MON required"
-        )
 
-        # ── Pre-broadcast simulation (eth_call) ──
-        sim = _simulate_deployment(w3, tx)
-        if not sim["ok"]:
-            logger.error(f"[DEPLOY] Simulation FAILED — will NOT broadcast: {sim['error']}")
-            print(f"  [SIMULATE] *** REVERT DETECTED *** {sim['error']}")
+            # Try EIP-1559 fee model first, fallback to legacy gasPrice
+            priority_fee = _get_priority_fee(w3)
+            if priority_fee > 0:
+                try:
+                    latest_block = w3.eth.get_block("latest")
+                    base_fee_per_gas = latest_block.get("baseFeePerGas", 0)
+                    max_fee = base_fee_per_gas * 2 + priority_fee
+                    base_tx["maxPriorityFeePerGas"] = priority_fee
+                    base_tx["maxFeePerGas"] = max_fee
+                except Exception:
+                    base_tx["gasPrice"] = int(w3.eth.gas_price * 1.2)
+            else:
+                base_tx["gasPrice"] = int(w3.eth.gas_price * 1.2)
+
+            # Build the function call
+            fn_call = router.functions.create(
+                (token_name, ticker, description, 0, salt, action_id)
+            )
+            tx = fn_call.build_transaction({**base_tx, "gas": 10_000_000})
+
+            # ── Dynamic gas estimation (eth_estimateGas × 1.5) ──
+            gas_limit = _estimate_gas_dynamic(w3, {
+                "from": tx["from"],
+                "to": tx["to"],
+                "data": tx.get("data", b""),
+                "value": tx.get("value", 0),
+            })
+            tx["gas"] = gas_limit
+
+            # ── Strict balance check (MIP-3/4/5: real-time reserved balance) ──
+            effective_fee = tx.get("maxFeePerGas", tx.get("gasPrice", w3.eth.gas_price))
+            bal_check = _check_sufficient_balance(
+                w3, account.address, int(value_wei), gas_limit, effective_fee
+            )
+            if not bal_check["ok"]:
+                balance_mon = float(Web3.from_wei(bal_check["balance_wei"], "ether"))
+                required_mon = float(Web3.from_wei(bal_check["required_wei"], "ether"))
+                last_error = (
+                    f"Insufficient MON balance for deployment: "
+                    f"{balance_mon:.6f} MON available, {required_mon:.6f} MON required "
+                    f"(liquidity + gas + 10% margin). "
+                    f"Shortfall: {bal_check['shortfall_mon']:.6f} MON"
+                )
+                logger.error(f"[DEPLOY] {last_error}")
+                print(f"  [BALANCE] *** INSUFFICIENT *** {last_error}")
+                # Halve and retry
+                current_liquidity_mon /= 2
+                continue
+
+            logger.info(
+                f"[BALANCE] OK — {Web3.from_wei(bal_check['balance_wei'], 'ether'):.6f} MON "
+                f">= {Web3.from_wei(bal_check['required_wei'], 'ether'):.6f} MON required"
+            )
+
+            # ── Pre-broadcast simulation (eth_call) ──
+            sim = _simulate_deployment(w3, tx)
+            if not sim["ok"]:
+                last_error = f"Simulation reverted: {sim['error']}"
+                logger.warning(
+                    f"[DEPLOY] Simulation FAILED on attempt {attempt} — "
+                    f"halving liquidity: {sim['error']}"
+                )
+                print(
+                    f"  [SIMULATE] *** REVERT on attempt {attempt} *** "
+                    f"halving liquidity ({current_liquidity_mon:.6f} → "
+                    f"{current_liquidity_mon / 2:.6f} MON)"
+                )
+                current_liquidity_mon /= 2
+                continue
+
+            # ── Simulation passed — broadcast ──
+            logger.info("[DEPLOY] Simulation SUCCESS — broadcasting transaction")
+            print("  [SIMULATE] Simulation SUCCESS — broadcasting...")
+
+            signed = account.sign_transaction(tx)
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            print(f"  [TX] Transaction Broadcasted: {tx_hash.hex()}")
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+            if receipt.status != 1:
+                return {
+                    "success": False,
+                    "token_address": None,
+                    "tx_hash": tx_hash.hex(),
+                    "error": f"Transaction reverted on-chain: {tx_hash.hex()}",
+                }
+
+            # Extract token address from return value or logs
+            token_address = None
+            try:
+                for log in receipt.logs:
+                    if len(log.topics) >= 2:
+                        addr_candidate = "0x" + log.topics[1].hex()[-40:]
+                        if Web3.is_address(addr_candidate):
+                            token_address = Web3.to_checksum_address(addr_candidate)
+                            break
+            except Exception:
+                pass
+
             return {
-                "success": False,
-                "token_address": None,
-                "tx_hash": None,
-                "error": f"Simulation reverted: {sim['error']}",
-            }
-        logger.info("[DEPLOY] Simulation passed — broadcasting transaction")
-        print("  [SIMULATE] Simulation OK — broadcasting...")
-
-        signed = account.sign_transaction(tx)
-        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-
-        if receipt.status != 1:
-            return {
-                "success": False,
-                "token_address": None,
+                "success": True,
+                "token_address": token_address,
                 "tx_hash": tx_hash.hex(),
-                "error": f"Transaction reverted on-chain: {tx_hash.hex()}",
+                "error": None,
             }
 
-        # Extract token address from return value or logs
-        token_address = None
-        try:
-            for log in receipt.logs:
-                if len(log.topics) >= 2:
-                    addr_candidate = "0x" + log.topics[1].hex()[-40:]
-                    if Web3.is_address(addr_candidate):
-                        token_address = Web3.to_checksum_address(addr_candidate)
-                        break
-        except Exception:
-            pass
-
+        # All retries exhausted
+        logger.error(f"[DEPLOY] All {max_retries} attempts failed. Last error: {last_error}")
+        print(f"  [DEPLOY] *** ALL {max_retries} RETRIES EXHAUSTED ***")
         return {
-            "success": True,
-            "token_address": token_address,
-            "tx_hash": tx_hash.hex(),
-            "error": None,
+            "success": False,
+            "token_address": None,
+            "tx_hash": None,
+            "error": f"All {max_retries} attempts failed. Last: {last_error}",
         }
 
     except Exception as e:
@@ -681,11 +722,11 @@ def run_deploy_health_check(
 
         try:
             router.functions.create(
-                ("HealthCheck", "HCHK", "deploy-health-check", 0, salt, 0)
+                ("HealthCheck", "HCHK", "deploy-health-check", 0, salt, 1)
             ).call({
                 "from": account.address,
                 "value": value_wei,
-                "gas": 5_000_000,
+                "gas": 10_000_000,
             })
             checks.append("Dry-run create() call succeeded")
         except Exception as e:

@@ -166,11 +166,11 @@ class AIClient:
 
     # ── Screening tier (Haiku 4.5 — cheap & fast) ──────────
 
-    def screen(self, system_prompt: str, user_message: str, max_tokens: int = 256) -> str | None:
+    def screen(self, system_prompt: str, user_message: str, max_tokens: int = 512) -> str | None:
         """Screening call via Haiku 4.5. Returns raw text or None."""
         return self._call(self.screening_model, system_prompt, user_message, max_tokens)
 
-    def screen_json(self, system_prompt: str, user_message: str, max_tokens: int = 256) -> dict | None:
+    def screen_json(self, system_prompt: str, user_message: str, max_tokens: int = 512) -> dict | None:
         """Screening call via Haiku 4.5. Returns parsed JSON or None."""
         return self._call_json(self.screening_model, system_prompt, user_message, max_tokens)
 
