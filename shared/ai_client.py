@@ -142,32 +142,26 @@ class AIClient:
             print(f"  [AI] Refusal detected (model declined to respond): {raw[:200]}")
             return None
 
-        try:
-            # Try direct parse first (ideal case: pure JSON response)
-            stripped = raw.strip()
-            if stripped.startswith("{"):
-                return json.loads(stripped)
-        except json.JSONDecodeError:
-            pass
+        # Strip markdown code fences (```json ... ``` or ``` ... ```) before parsing
+        cleaned = re.sub(r"```(?:json|JSON)?\s*", "", raw)
+        cleaned = re.sub(r"```", "", cleaned)
+        cleaned = cleaned.strip()
 
         try:
-            # Fallback: strip markdown code fences and retry
-            cleaned = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.MULTILINE)
-            cleaned = re.sub(r"\s*```\s*$", "", cleaned, flags=re.MULTILINE)
-            if cleaned.strip().startswith("{"):
-                return json.loads(cleaned.strip())
+            if cleaned.startswith("{"):
+                return json.loads(cleaned)
         except json.JSONDecodeError:
             pass
 
         try:
             # Last resort: extract first JSON object from the response
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
             if match:
                 return json.loads(match.group())
         except json.JSONDecodeError:
-            print(f"  [AI] JSON parse failed: {raw[:200]}")
+            print(f"  [AI] JSON parse failed: {cleaned[:200]}")
 
-        print(f"  [AI] No valid JSON found in response: {raw[:200]}")
+        print(f"  [AI] No valid JSON found in response: {cleaned[:200]}")
         return None
 
     # ── Screening tier (Haiku 4.5 — cheap & fast) ──────────
